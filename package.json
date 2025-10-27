@@ -1,0 +1,55 @@
+{
+  "name": "raster-path",
+  "version": "1.0.0",
+  "description": "Terrain and Tool Raster Path Finder using WebGPU",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src/**/*.js",
+    "src/web/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gridspace/raster-path.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gridspace/raster-path/issues"
+  },
+  "scripts": {
+    "build": "npm run clean && npm run build:web",
+    "build:web": "mkdir -p build && cp src/web/* build/ && cp src/index.js build/raster-path.js",
+    "clean": "rm -rf build/",
+    "dev": "npm run build && npm run serve -- -p 9090",
+    "serve": "npx serve build",
+    "test": "npm run test:toolpath && npm run test:tiled",
+    "test:regression": "npm run build && electron src/test/regression-test.cjs",
+    "test:toolpath": "npm run build && electron src/test/toolpath-regression.cjs",
+    "test:tiled": "npm run build && electron src/test/toolpath-tiled-test.cjs",
+    "test:radial": "npm run build && electron src/test/radial-toolpath-test.cjs",
+    "test:radial-padding": "npm run build && electron src/test/radial-padding-test.cjs",
+    "test:radial-benchmark": "npm run build && electron src/test/radial-production-benchmark.cjs",
+    "test:planar-vs-radial": "npm run build && electron src/test/planar-vs-radial-test.cjs"
+  },
+  "keywords": [
+    "cnc",
+    "toolpath",
+    "rasterization",
+    "terrain",
+    "webgpu",
+    "stl",
+    "3d",
+    "gpu-accelerated"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "serve": "^14.2.1"
+  }
+}

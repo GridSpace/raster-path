@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raster Path</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container">
+        <div id="drop-zone" class="drop-zone">
+            <div class="drop-zone-content">
+                <p class="drop-zone-text">Drag & Drop STL file here</p>
+                <p class="drop-zone-subtext">or click to browse</p>
+                <input type="file" id="file-input" accept=".stl" hidden>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <h3>Mode</h3>
+                <div class="mode-control">
+                    <label>
+                        <input type="radio" name="toolpath-mode" value="planar" checked> Planar
+                    </label>
+                    <label>
+                        <input type="radio" name="toolpath-mode" value="radial"> Radial
+                    </label>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <h3>Terrain</h3>
+                <div class="step-size-control">
+                    <label for="step-size-select">Detail:</label>
+                    <select id="step-size-select">
+                        <option value="1.0">1.0mm (Fast)</option>
+                        <option value="0.5">0.5mm (Good)</option>
+                        <option value="0.1" selected>0.1mm (High)</option>
+                        <option value="0.05">0.05mm (Max)</option>
+                    </select>
+                    <button id="recompute-btn" class="recompute-btn" disabled>Recompute</button>
+                </div>
+                <div class="bounds-control">
+                    <label>
+                        <input type="checkbox" id="use-bounds-override"> Custom Bounds
+                    </label>
+                </div>
+                <div id="bounds-inputs" class="bounds-inputs" style="display: none;">
+                    <div class="bounds-row">
+                        <label>Min:</label>
+                        <input type="number" id="bounds-min-x" placeholder="X" step="0.1">
+                        <input type="number" id="bounds-min-y" placeholder="Y" step="0.1">
+                        <input type="number" id="bounds-min-z" placeholder="Z" step="0.1">
+                    </div>
+                    <div class="bounds-row">
+                        <label>Max:</label>
+                        <input type="number" id="bounds-max-x" placeholder="X" step="0.1">
+                        <input type="number" id="bounds-max-y" placeholder="Y" step="0.1">
+                        <input type="number" id="bounds-max-z" placeholder="Z" step="0.1">
+                    </div>
+                    <button id="bounds-from-stl-btn" class="bounds-btn">From STL</button>
+                    <button id="bounds-add-padding-btn" class="bounds-btn">Add Padding</button>
+                </div>
+            </div>
+
+            <div class="control-group toolpath-controls" id="toolpath-controls">
+                <h3>Toolpath</h3>
+                <div class="tool-file-control">
+                    <label for="tool-file-input">Tool STL:</label>
+                    <input type="file" id="tool-file-input" accept=".stl">
+                    <span id="tool-filename" class="filename-display">None</span>
+                </div>
+                <div class="step-control">
+                    <label for="x-step-input">X Step:</label>
+                    <input type="number" id="x-step-input" value="5" min="1" max="50">
+                    <span class="unit">points</span>
+                </div>
+                <div class="step-control" id="y-step-control">
+                    <label for="y-step-input">Y Step:</label>
+                    <input type="number" id="y-step-input" value="5" min="1" max="50">
+                    <span class="unit">points</span>
+                </div>
+                <div class="step-control" id="x-rotation-step-control" style="display: none;">
+                    <label for="x-rotation-step-input">Rotation Step:</label>
+                    <input type="number" id="x-rotation-step-input" value="5" min="1" max="90" step="1">
+                    <span class="unit">degrees</span>
+                </div>
+                <div class="step-control">
+                    <label for="z-floor-input">Z Floor:</label>
+                    <input type="number" id="z-floor-input" value="-100" step="10">
+                    <span class="unit">mm</span>
+                </div>
+                <button id="generate-toolpath-btn" class="generate-btn" disabled>Generate Toolpath</button>
+                <button id="clear-toolpath-btn" class="clear-btn" disabled>Clear Toolpath</button>
+                <div id="progress-container" class="progress-container" style="display: none;">
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill"></div>
+                    </div>
+                    <div id="progress-text" class="progress-text">0%</div>
+                </div>
+                <div class="visibility-control">
+                    <label>
+                        <input type="checkbox" id="show-terrain" checked> <span id="show-terrain-label">Show Terrain</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div id="info" class="info hidden">
+            <div class="info-item">
+                <span class="info-label">Status:</span>
+                <span id="status" class="info-value">Ready</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Points:</span>
+                <span id="point-count" class="info-value">0</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Bounds:</span>
+                <span id="bounds" class="info-value">-</span>
+            </div>
+        </div>
+
+        <div id="timing-panel" class="timing-panel hidden">
+            <h4>Performance</h4>
+            <div class="timing-section">
+                <div class="timing-header">Time</div>
+                <div class="timing-item">
+                    <span class="timing-label">Terrain:</span>
+                    <span id="timing-terrain" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Tool:</span>
+                    <span id="timing-tool" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Toolpath:</span>
+                    <span id="timing-toolpath" class="timing-value">-</span>
+                </div>
+            </div>
+            <div class="timing-section">
+                <div class="timing-header">Memory (JS)</div>
+                <div class="timing-item">
+                    <span class="timing-label">Terrain:</span>
+                    <span id="memory-terrain" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Tool:</span>
+                    <span id="memory-tool" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">Toolpath:</span>
+                    <span id="memory-toolpath" class="timing-value">-</span>
+                </div>
+            </div>
+            <div class="timing-section">
+                <div class="timing-header">Total JS Heap</div>
+                <div class="timing-item">
+                    <span id="memory-total" class="timing-value-large">-</span>
+                </div>
+            </div>
+            <div class="timing-section">
+                <div class="timing-header">GPU / Tiling</div>
+                <div class="timing-item">
+                    <span class="timing-label">Tiling:</span>
+                    <span id="tiling-status" class="timing-value">-</span>
+                </div>
+                <div class="timing-item">
+                    <span class="timing-label">GPU Limit:</span>
+                    <span id="gpu-limit" class="timing-value">-</span>
+                </div>
+            </div>
+        </div>
+
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>
