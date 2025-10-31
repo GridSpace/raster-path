@@ -1,5 +1,5 @@
 {
-  "name": "raster-path",
+  "name": "@gridspace/raster-path",
   "version": "1.0.0",
   "description": "Terrain and Tool Raster Path Finder using WebGPU",
   "type": "module",

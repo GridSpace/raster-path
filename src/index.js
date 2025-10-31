@@ -11,6 +11,17 @@
  * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
  */
 
+const debug = {
+    error: console.error,
+    warn: console.warn,
+    log: console.log,
+    silent: false
+};
+
+if (debug.silent) {
+    debug.log = function() {};
+}
+
 /**
  * Main class for rasterizing geometry and generating toolpaths using WebGPU
  * Manages WebGPU worker lifecycle and provides async API for conversions
@@ -26,6 +37,7 @@ export class RasterPath {
 
         // Configuration with defaults
         this.config = {
+            workerName: (config.workerName ?? "webgpu-worker.js") + (debug.silent ? "?silent" : ""),
             maxGPUMemoryMB: config.maxGPUMemoryMB ?? 256,
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             tileOverlapMM: config.tileOverlapMM ?? 10,
@@ -50,16 +62,19 @@ export class RasterPath {
                 // Create worker from the webgpu-worker.js file
                 // Support both source (src/index.js -> src/web/webgpu-worker.js)
                 // and build (build/raster-path.js -> build/webgpu-worker.js)
+                const workerName = this.config.workerName;
                 const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
-                const workerPath = isBuildVersion
-                    ? new URL('./webgpu-worker.js', import.meta.url)
-                    : new URL('./web/webgpu-worker.js', import.meta.url);
+                const workerPath = workerName
+                    ? new URL(workerName, import.meta.url)
+                : isBuildVersion
+                    ? new URL(`./webgpu-worker.js`, import.meta.url)
+                    : new URL(`./web/webgpu-worker.js`, import.meta.url);
                 this.worker = new Worker(workerPath, { type: 'module' });
 
                 // Set up message handler
                 this.worker.onmessage = (e) => this._handleMessage(e);
                 this.worker.onerror = (error) => {
-                    console.error('[RasterPath] Worker error:', error);
+                    debug.error('[RasterPath] Worker error:', error);
                     reject(error);
                 };
 
@@ -92,12 +107,15 @@ export class RasterPath {
         }
 
         const numWorkers = this.config.parallelWorkers;
-        console.log(`[RasterPath] Initializing worker pool with ${numWorkers} workers...`);
+        debug.log(`[RasterPath] Initializing worker pool with ${numWorkers} workers...`);
 
+        const workerName = this.config.workerName;
         const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
-        const workerPath = isBuildVersion
-            ? new URL('./webgpu-worker.js', import.meta.url)
-            : new URL('./web/webgpu-worker.js', import.meta.url);
+        const workerPath = workerName
+            ? new URL(workerName, import.meta.url)
+        : isBuildVersion
+            ? new URL(`./webgpu-worker.js`, import.meta.url)
+            : new URL(`./web/webgpu-worker.js`, import.meta.url);
 
         // Create and initialize all workers in parallel
         const initPromises = [];
@@ -113,14 +131,14 @@ export class RasterPath {
 
                     worker.onmessage = (e) => this._handleWorkerMessage(workerState, e);
                     worker.onerror = (error) => {
-                        console.error(`[RasterPath] Worker ${i} error:`, error);
+                        debug.error(`[RasterPath] Worker ${i} error:`, error);
                         reject(error);
                     };
 
                     // Send init message
                     const handler = (data) => {
                         if (data.success) {
-                            console.log(`[RasterPath] Worker ${i} initialized`);
+                            debug.log(`[RasterPath] Worker ${i} initialized`);
                             resolve(workerState);
                         } else {
                             reject(new Error(`Worker ${i} failed to initialize WebGPU`));
@@ -137,10 +155,10 @@ export class RasterPath {
 
         try {
             this.workerPool = await Promise.all(initPromises);
-            console.log(`[RasterPath] Worker pool initialized with ${this.workerPool.length} workers`);
+            debug.log(`[RasterPath] Worker pool initialized with ${this.workerPool.length} workers`);
             return true;
         } catch (error) {
-            console.error('[RasterPath] Failed to initialize worker pool:', error);
+            debug.error('[RasterPath] Failed to initialize worker pool:', error);
             // Clean up any initialized workers
             for (const workerState of this.workerPool) {
                 workerState.worker.terminate();
@@ -271,20 +289,20 @@ export class RasterPath {
             angles.push(angle);
         }
 
-        console.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
-        console.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
+        debug.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
+        debug.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
 
         // Use Phase 2A (parallel workers with GPU rotation)
         // Splits rotations across workers for excellent performance (5-6 seconds for 360 rotations)
         if (this.workerPool.length > 0 && angles.length >= 4) {
-            console.log(`[RasterPath] Using Phase 2A (parallel workers with GPU rotation)`);
+            debug.log(`[RasterPath] Using Phase 2A (parallel workers with GPU rotation)`);
             return this._generateRadialToolpathParallel(
                 terrainTriangles, toolPositions, angles, xStep, zFloor,
                 gridStep, terrainBounds, toolRadius, xRotationStep, startTime, options
             );
         }
 
-        console.log(`[RasterPath] Falling back to sequential processing (no workers)`);
+        debug.log(`[RasterPath] Falling back to sequential processing (no workers)`);
 
         const { onProgress } = options;
 
@@ -343,7 +361,7 @@ export class RasterPath {
             scanlines.push(scanlineData.scanline);
 
             if (i === 0) {
-                console.log(`  Scanline output: ${scanlineData.scanline.length} points`);
+                debug.log(`  Scanline output: ${scanlineData.scanline.length} points`);
             }
         }
 
@@ -352,13 +370,13 @@ export class RasterPath {
 
         // Combine scanlines into single Float32Array
         const pointsPerLine = scanlines[0].length;
-        console.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
+        debug.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
         const pathData = new Float32Array(angles.length * pointsPerLine);
         for (let i = 0; i < scanlines.length; i++) {
             pathData.set(scanlines[i], i * pointsPerLine);
         }
 
-        console.log(`✅ Radial toolpath complete: ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
+        debug.log(`✅ Radial toolpath complete: ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
 
         return {
             pathData,
@@ -396,7 +414,7 @@ export class RasterPath {
             });
         }
 
-        console.log(`[RasterPath] Split ${angles.length} rotations across ${workerTasks.length} workers`);
+        debug.log(`[RasterPath] Split ${angles.length} rotations across ${workerTasks.length} workers`);
 
         // Shared progress tracker (aggregate across all workers)
         let completedRotations = 0;
@@ -437,13 +455,13 @@ export class RasterPath {
 
         // Combine scanlines into single Float32Array
         const pointsPerLine = allScanlines[0].length;
-        console.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
+        debug.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
         const pathData = new Float32Array(angles.length * pointsPerLine);
         for (let i = 0; i < allScanlines.length; i++) {
             pathData.set(allScanlines[i], i * pointsPerLine);
         }
 
-        console.log(`✅ Radial toolpath complete (parallel): ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
+        debug.log(`✅ Radial toolpath complete (parallel): ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
 
         return {
             pathData,

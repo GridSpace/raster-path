@@ -11,25 +11,36 @@ let cachedToolpathShaderModule = null;
 let config = null;
 let deviceCapabilities = null;
 
+const debug = {
+    error: console.error,
+    warn: console.warn,
+    log: console.log,
+};
+
+// url param to silence debug output
+if (self.location.search.slice(1) === 'silent') {
+    debug.log = function() {};
+}
+
 // Initialize WebGPU device in worker context
 async function initWebGPU() {
     if (isInitialized) return true;
 
     if (!navigator.gpu) {
-        console.warn('[WebGPU Worker] WebGPU not supported');
+        debug.warn('[WebGPU Worker] WebGPU not supported');
         return false;
     }
 
     try {
         const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) {
-            console.warn('[WebGPU Worker] WebGPU adapter not available');
+            debug.warn('[WebGPU Worker] WebGPU adapter not available');
             return false;
         }
 
         // Request device with higher limits for large meshes
         const adapterLimits = adapter.limits;
-        console.log('[WebGPU Worker] Adapter limits:', {
+        debug.log('[WebGPU Worker] Adapter limits:', {
             maxStorageBufferBindingSize: adapterLimits.maxStorageBufferBindingSize,
             maxBufferSize: adapterLimits.maxBufferSize
         });
@@ -74,10 +85,10 @@ async function initWebGPU() {
         };
 
         isInitialized = true;
-        console.log('[WebGPU Worker] ✅ Initialized (pipelines cached)');
+        debug.log('[WebGPU Worker] ✅ Initialized (pipelines cached)');
         return true;
     } catch (error) {
-        console.error('[WebGPU Worker] Failed to initialize:', error);
+        debug.error('[WebGPU Worker] Failed to initialize:', error);
         return false;
     }
 }
@@ -417,7 +428,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     const gridHeight = Math.max(1, Math.ceil((bounds.max.y - bounds.min.y) / cellSize));
     const totalCells = gridWidth * gridHeight;
 
-    // console.log(`[WebGPU Worker] Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
+    // debug.log(`[WebGPU Worker] Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
 
     const grid = new Array(totalCells);
     for (let i = 0; i < totalCells; i++) {
@@ -473,7 +484,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     cellOffsets[totalCells] = currentOffset;
 
     const avgPerCell = totalTriangleRefs / totalCells;
-    // console.log(`[WebGPU Worker] Spatial grid: ${totalTriangleRefs} refs (avg ${avgPerCell.toFixed(1)} per cell)`);
+    // debug.log(`[WebGPU Worker] Spatial grid: ${totalTriangleRefs} refs (avg ${avgPerCell.toFixed(1)} per cell)`);
 
     return {
         gridWidth,
@@ -497,10 +508,10 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
             throw new Error('WebGPU not available');
         }
         const initEnd = performance.now();
-        console.log(`[WebGPU Worker] First-time init: ${(initEnd - initStart).toFixed(1)}ms`);
+        debug.log(`[WebGPU Worker] First-time init: ${(initEnd - initStart).toFixed(1)}ms`);
     }
 
-    // console.log(`[WebGPU Worker] Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
+    // debug.log(`[WebGPU Worker] Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
 
     // Extract options
     const boundsOverride = options.bounds || options.min ? options : null;  // Support old and new format
@@ -509,7 +520,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     const bounds = boundsOverride || calculateBounds(triangles);
 
     if (boundsOverride) {
-        // console.log(`[WebGPU Worker] Using bounds override: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
+        // debug.log(`[WebGPU Worker] Using bounds override: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
 
         // Validate bounds
         if (bounds.min.x >= bounds.max.x || bounds.min.y >= bounds.max.y || bounds.min.z >= bounds.max.z) {
@@ -521,7 +532,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
     const totalGridPoints = gridWidth * gridHeight;
 
-    // console.log(`[WebGPU Worker] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints.toLocaleString()} points`);
+    // debug.log(`[WebGPU Worker] Grid: ${gridWidth}x${gridHeight} = ${totalGridPoints.toLocaleString()} points`);
 
     // Calculate buffer size based on filter mode
     // filterMode 0 (terrain): Dense Z-only output (1 float per grid cell)
@@ -530,7 +541,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     const outputSize = totalGridPoints * floatsPerPoint * 4;
     const maxBufferSize = device.limits.maxBufferSize || 268435456; // 256MB default
     const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
-    // console.log(`[WebGPU Worker] Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
+    // debug.log(`[WebGPU Worker] Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
 
     if (outputSize > maxBufferSize) {
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
@@ -595,7 +606,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         throw new Error(`Grid dimensions exceed u32 max: ${gridWidth}x${gridHeight}`);
     }
 
-    // console.log(`[WebGPU Worker] Uniforms: gridWidth=${gridWidth}, gridHeight=${gridHeight}, triangles=${triangles.length / 9}`);
+    // debug.log(`[WebGPU Worker] Uniforms: gridWidth=${gridWidth}, gridHeight=${gridHeight}, triangles=${triangles.length / 9}`);
 
     const uniformBuffer = device.createBuffer({
         size: uniformData.byteLength,
@@ -627,7 +638,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
 
     // Check dispatch limits
     const maxWorkgroupsPerDim = device.limits.maxComputeWorkgroupsPerDimension || 65535;
-    // console.log(`[WebGPU Worker] Dispatching ${workgroupsX}x${workgroupsY} workgroups (max per dim: ${maxWorkgroupsPerDim})`);
+    // debug.log(`[WebGPU Worker] Dispatching ${workgroupsX}x${workgroupsY} workgroups (max per dim: ${maxWorkgroupsPerDim})`);
 
     if (workgroupsX > maxWorkgroupsPerDim || workgroupsY > maxWorkgroupsPerDim) {
         throw new Error(`Workgroup dispatch too large: ${workgroupsX}x${workgroupsY} exceeds limit of ${maxWorkgroupsPerDim}. Try a larger step size.`);
@@ -676,7 +687,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         for (let i = 0; i < totalGridPoints; i++) {
             if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
         }
-        // console.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage)`);
+        // debug.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage)`);
     } else {
         // Tool: Sparse output (X,Y,Z triplets), compact to remove invalid points
         const validPoints = [];
@@ -708,8 +719,8 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
 
     const endTime = performance.now();
     const conversionTime = endTime - startTime;
-    // console.log(`[WebGPU Worker] ✅ Rasterize complete: ${pointCount} points in ${conversionTime.toFixed(1)}ms`);
-    // console.log(`[WebGPU Worker] Bounds: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
+    // debug.log(`[WebGPU Worker] ✅ Rasterize complete: ${pointCount} points in ${conversionTime.toFixed(1)}ms`);
+    // debug.log(`[WebGPU Worker] Bounds: min(${bounds.min.x.toFixed(2)}, ${bounds.min.y.toFixed(2)}, ${bounds.min.z.toFixed(2)}) max(${bounds.max.x.toFixed(2)}, ${bounds.max.y.toFixed(2)}, ${bounds.max.z.toFixed(2)})`);
 
     // Verify result data integrity
     if (filterMode === 0) {
@@ -718,7 +729,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
             const EMPTY_CELL = -1e10;
             const firstZ = result[0] <= EMPTY_CELL + 1 ? 'EMPTY' : result[0].toFixed(3);
             const lastZ = result[result.length-1] <= EMPTY_CELL + 1 ? 'EMPTY' : result[result.length-1].toFixed(3);
-            // console.log(`[WebGPU Worker] First Z: ${firstZ}, Last Z: ${lastZ}`);
+            // debug.log(`[WebGPU Worker] First Z: ${firstZ}, Last Z: ${lastZ}`);
         }
     } else {
         // Tool: Sparse X,Y,Z format
@@ -726,7 +737,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
             const firstPoint = `(${result[0].toFixed(3)}, ${result[1].toFixed(3)}, ${result[2].toFixed(3)})`;
             const lastIdx = result.length - 3;
             const lastPoint = `(${result[lastIdx].toFixed(3)}, ${result[lastIdx+1].toFixed(3)}, ${result[lastIdx+2].toFixed(3)})`;
-            // console.log(`[WebGPU Worker] First point: ${firstPoint}, Last point: ${lastPoint}`);
+            // debug.log(`[WebGPU Worker] First point: ${firstPoint}, Last point: ${lastPoint}`);
         }
     }
 
@@ -752,7 +763,7 @@ function createTiles(bounds, stepSize, maxMemoryBytes) {
     // This is 4x more efficient than the old sparse format (16 bytes → 4 bytes per point)
     const bytesPerPoint = 1 * 4; // 4 bytes per grid point (Z-only)
     const maxPointsPerTile = Math.floor(maxMemoryBytes / bytesPerPoint);
-    console.log(`[WebGPU Worker] Dense terrain format: ${bytesPerPoint} bytes/point (was 16), can fit ${(maxPointsPerTile/1e6).toFixed(1)}M points per tile`);
+    debug.log(`[WebGPU Worker] Dense terrain format: ${bytesPerPoint} bytes/point (was 16), can fit ${(maxPointsPerTile/1e6).toFixed(1)}M points per tile`);
 
     // Calculate optimal tile grid dimensions while respecting aspect ratio
     // We want: tileGridW * tileGridH <= maxPointsPerTile
@@ -790,8 +801,8 @@ function createTiles(bounds, stepSize, maxMemoryBytes) {
     const actualTileWidth = width / tilesX;
     const actualTileHeight = height / tilesY;
 
-    console.log(`[WebGPU Worker] Creating ${tilesX}x${tilesY} = ${tilesX * tilesY} tiles (${actualTileWidth.toFixed(2)}mm × ${actualTileHeight.toFixed(2)}mm each)`);
-    console.log(`[WebGPU Worker] Tile grid: ${Math.ceil(actualTileWidth / stepSize)}x${Math.ceil(actualTileHeight / stepSize)} points per tile`);
+    debug.log(`[WebGPU Worker] Creating ${tilesX}x${tilesY} = ${tilesX * tilesY} tiles (${actualTileWidth.toFixed(2)}mm × ${actualTileHeight.toFixed(2)}mm each)`);
+    debug.log(`[WebGPU Worker] Tile grid: ${Math.ceil(actualTileWidth / stepSize)}x${Math.ceil(actualTileHeight / stepSize)} points per tile`);
 
     const tiles = [];
     const overlap = stepSize * 2; // Overlap by 2 grid cells to ensure no gaps
@@ -834,7 +845,7 @@ function stitchTiles(tileResults, fullBounds, stepSize) {
 
     if (isDense) {
         // DENSE TERRAIN STITCHING: Simple array copying (Z-only format)
-        console.log(`[WebGPU Worker] Stitching ${tileResults.length} dense terrain tiles...`);
+        debug.log(`[WebGPU Worker] Stitching ${tileResults.length} dense terrain tiles...`);
 
         // Calculate global grid dimensions
         const globalWidth = Math.ceil((fullBounds.max.x - fullBounds.min.x) / stepSize) + 1;
@@ -846,7 +857,7 @@ function stitchTiles(tileResults, fullBounds, stepSize) {
         const globalGrid = new Float32Array(totalGridCells);
         globalGrid.fill(EMPTY_CELL);
 
-        console.log(`[WebGPU Worker] Global grid: ${globalWidth}x${globalHeight} = ${totalGridCells.toLocaleString()} cells`);
+        debug.log(`[WebGPU Worker] Global grid: ${globalWidth}x${globalHeight} = ${totalGridCells.toLocaleString()} cells`);
 
         // Copy each tile's Z-values to the correct position in global grid
         for (const tile of tileResults) {
@@ -888,7 +899,7 @@ function stitchTiles(tileResults, fullBounds, stepSize) {
             if (globalGrid[i] > EMPTY_CELL + 1) validCount++;
         }
 
-        console.log(`[WebGPU Worker] ✅ Stitched: ${totalGridCells} total cells, ${validCount} with geometry (${(validCount/totalGridCells*100).toFixed(1)}% coverage)`);
+        debug.log(`[WebGPU Worker] ✅ Stitched: ${totalGridCells} total cells, ${validCount} with geometry (${(validCount/totalGridCells*100).toFixed(1)}% coverage)`);
 
         return {
             positions: globalGrid,
@@ -903,7 +914,7 @@ function stitchTiles(tileResults, fullBounds, stepSize) {
 
     } else {
         // SPARSE TOOL STITCHING: Keep existing deduplication logic (X,Y,Z triplets)
-        console.log(`[WebGPU Worker] Stitching ${tileResults.length} sparse tool tiles...`);
+        debug.log(`[WebGPU Worker] Stitching ${tileResults.length} sparse tool tiles...`);
 
         const pointMap = new Map();
 
@@ -945,7 +956,7 @@ function stitchTiles(tileResults, fullBounds, stepSize) {
             allPositions[writeOffset++] = point.z;
         }
 
-        console.log(`[WebGPU Worker] ✅ Stitched: ${finalPointCount} unique sparse points`);
+        debug.log(`[WebGPU Worker] ✅ Stitched: ${finalPointCount} unique sparse points`);
 
         return {
             positions: allPositions,
@@ -986,7 +997,7 @@ async function rasterizeMesh(triangles, stepSize, filterMode, options = {}) {
 
     // Check if tiling is needed
     if (shouldUseTiling(bounds, stepSize)) {
-        console.log('[WebGPU Worker] Tiling required - switching to tiled rasterization');
+        debug.log('[WebGPU Worker] Tiling required - switching to tiled rasterization');
 
         // Calculate max safe size per tile
         const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
@@ -1000,8 +1011,8 @@ async function rasterizeMesh(triangles, stepSize, filterMode, options = {}) {
         const tileResults = [];
         for (let i = 0; i < tiles.length; i++) {
             const tileStart = performance.now();
-            console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}: ${tiles[i].id}`);
-            console.log(`[WebGPU Worker]   Tile bounds: min(${tiles[i].bounds.min.x.toFixed(2)}, ${tiles[i].bounds.min.y.toFixed(2)}) max(${tiles[i].bounds.max.x.toFixed(2)}, ${tiles[i].bounds.max.y.toFixed(2)})`);
+            debug.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}: ${tiles[i].id}`);
+            debug.log(`[WebGPU Worker]   Tile bounds: min(${tiles[i].bounds.min.x.toFixed(2)}, ${tiles[i].bounds.min.y.toFixed(2)}) max(${tiles[i].bounds.max.x.toFixed(2)}, ${tiles[i].bounds.max.y.toFixed(2)})`);
 
             const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, {
                 ...tiles[i].bounds,
@@ -1009,7 +1020,7 @@ async function rasterizeMesh(triangles, stepSize, filterMode, options = {}) {
             });
 
             const tileTime = performance.now() - tileStart;
-            console.log(`[WebGPU Worker]   Tile ${i + 1} complete: ${tileResult.pointCount} points in ${tileTime.toFixed(1)}ms`);
+            debug.log(`[WebGPU Worker]   Tile ${i + 1} complete: ${tileResult.pointCount} points in ${tileTime.toFixed(1)}ms`);
 
             // Store tile bounds with result for coordinate conversion during stitching
             tileResult.tileBounds = tiles[i].bounds;
@@ -1046,7 +1057,7 @@ function createHeightMapFromPoints(points, gridStep, bounds = null) {
     const height = Math.ceil((maxY - minY) / gridStep) + 1;
 
     // Terrain is ALWAYS dense (Z-only format from GPU rasterizer)
-    // console.log(`[WebGPU Worker] Terrain dense format: ${width}x${height} = ${points.length} cells`);
+    // debug.log(`[WebGPU Worker] Terrain dense format: ${width}x${height} = ${points.length} cells`);
 
     return {
         grid: points,  // Dense Z-only array
@@ -1063,7 +1074,7 @@ function createHeightMapFromPoints(points, gridStep, bounds = null) {
 
 // Helper: Create sparse tool representation
 // Points come from GPU as [gridX, gridY, Z] - pure integer grid coordinates for X/Y
-function createSparseToolFromPoints(points, gridStep) {
+function createSparseToolFromPoints(points) {
     if (!points || points.length === 0) {
         throw new Error('No tool points provided');
     }
@@ -1111,6 +1122,9 @@ function createSparseToolFromPoints(points, gridStep) {
         zValues.push(zValue);
     }
 
+    // console.log(JSON.stringify({ width, height, centerX, centerY }));
+    // console.log(zValues);
+
     return {
         count: xOffsets.length,
         xOffsets: new Int32Array(xOffsets),
@@ -1123,21 +1137,21 @@ function createSparseToolFromPoints(points, gridStep) {
 // Generate toolpath for a single region (internal)
 async function generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
     const startTime = performance.now();
-    console.log('[WebGPU Worker] Generating toolpath...');
-    console.log(`[WebGPU Worker] Input: terrain ${terrainPoints.length/3} points, tool ${toolPoints.length/3} points, steps (${xStep}, ${yStep}), oobZ ${oobZ}, gridStep ${gridStep}`);
+    debug.log('[WebGPU Worker] Generating toolpath...');
+    debug.log(`[WebGPU Worker] Input: terrain ${terrainPoints.length/3} points, tool ${toolPoints.length/3} points, steps (${xStep}, ${yStep}), oobZ ${oobZ}, gridStep ${gridStep}`);
 
     if (terrainBounds) {
-        console.log(`[WebGPU Worker] Using terrain bounds: min(${terrainBounds.min.x.toFixed(2)}, ${terrainBounds.min.y.toFixed(2)}, ${terrainBounds.min.z.toFixed(2)}) max(${terrainBounds.max.x.toFixed(2)}, ${terrainBounds.max.y.toFixed(2)}, ${terrainBounds.max.z.toFixed(2)})`);
+        debug.log(`[WebGPU Worker] Using terrain bounds: min(${terrainBounds.min.x.toFixed(2)}, ${terrainBounds.min.y.toFixed(2)}, ${terrainBounds.min.z.toFixed(2)}) max(${terrainBounds.max.x.toFixed(2)}, ${terrainBounds.max.y.toFixed(2)}, ${terrainBounds.max.z.toFixed(2)})`);
     }
 
     try {
         // Create height map from terrain points (use terrain bounds if provided)
         const terrainMapData = createHeightMapFromPoints(terrainPoints, gridStep, terrainBounds);
-        console.log(`[WebGPU Worker] Created terrain map: ${terrainMapData.width}x${terrainMapData.height}`);
+        debug.log(`[WebGPU Worker] Created terrain map: ${terrainMapData.width}x${terrainMapData.height}`);
 
         // Create sparse tool representation
-        const sparseToolData = createSparseToolFromPoints(toolPoints, gridStep);
-        console.log(`[WebGPU Worker] Created sparse tool: ${sparseToolData.count} points`);
+        const sparseToolData = createSparseToolFromPoints(toolPoints);
+        debug.log(`[WebGPU Worker] Created sparse tool: ${sparseToolData.count} points`);
 
         // Run WebGPU compute
         const result = await runToolpathCompute(
@@ -1146,7 +1160,7 @@ async function generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, o
 
         return result;
     } catch (error) {
-        console.error('[WebGPU Worker] Error generating toolpath:', error);
+        debug.error('[WebGPU Worker] Error generating toolpath:', error);
         throw error;
     }
 }
@@ -1189,7 +1203,7 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     const numScanlines = Math.ceil(terrainMapData.height / yStep);
     const outputSize = pointsPerLine * numScanlines;
 
-    console.log(`[WebGPU Worker] Output: ${pointsPerLine}x${numScanlines} = ${outputSize} points`);
+    debug.log(`[WebGPU Worker] Output: ${pointsPerLine}x${numScanlines} = ${outputSize} points`);
 
     const outputBuffer = device.createBuffer({
         size: outputSize * 4,
@@ -1257,12 +1271,12 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     stagingBuffer.destroy();
 
     const endTime = performance.now();
-    console.log(`[WebGPU Worker] ✅ Toolpath complete in ${(endTime - startTime).toFixed(1)}ms`);
-    console.log(`[WebGPU Worker] Output: ${result.length} values (${numScanlines} scanlines × ${pointsPerLine} points)`);
+    debug.log(`[WebGPU Worker] ✅ Toolpath complete in ${(endTime - startTime).toFixed(1)}ms`);
+    debug.log(`[WebGPU Worker] Output: ${result.length} values (${numScanlines} scanlines × ${pointsPerLine} points)`);
 
     // Log sample of output for debugging
     const sampleSize = Math.min(10, result.length);
-    console.log(`[WebGPU Worker] First ${sampleSize} values:`, Array.from(result.slice(0, sampleSize)));
+    debug.log(`[WebGPU Worker] First ${sampleSize} values:`, Array.from(result.slice(0, sampleSize)));
 
     return {
         pathData: result,
@@ -1326,13 +1340,13 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
 
     // Tiling needed (terrain is ALWAYS dense)
     const tilingStartTime = performance.now();
-    console.log('[WebGPU Worker] 🔲 Using tiled toolpath generation');
-    console.log(`[WebGPU Worker] Terrain: DENSE (${terrainPoints.length} cells = ${outputWidth}x${outputHeight})`);
-    console.log(`[WebGPU Worker] Tool dimensions: ${toolWidthMm.toFixed(2)}mm × ${toolHeightMm.toFixed(2)}mm (${toolWidthCells}×${toolHeightCells} cells)`);
+    debug.log('[WebGPU Worker] 🔲 Using tiled toolpath generation');
+    debug.log(`[WebGPU Worker] Terrain: DENSE (${terrainPoints.length} cells = ${outputWidth}x${outputHeight})`);
+    debug.log(`[WebGPU Worker] Tool dimensions: ${toolWidthMm.toFixed(2)}mm × ${toolHeightMm.toFixed(2)}mm (${toolWidthCells}×${toolHeightCells} cells)`);
 
     // Create tiles with tool-size overlap (pass dimensions in grid cells)
     const tiles = createToolpathTiles(terrainBounds, gridStep, xStep, yStep, toolWidthCells, toolHeightCells, maxSafeSize);
-    console.log(`[WebGPU Worker] Created ${tiles.length} tiles`);
+    debug.log(`[WebGPU Worker] Created ${tiles.length} tiles`);
 
     // Process each tile
     const tileResults = [];
@@ -1340,7 +1354,7 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
     for (let i = 0; i < tiles.length; i++) {
         const tile = tiles[i];
         const tileStartTime = performance.now();
-        console.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}...`);
+        debug.log(`[WebGPU Worker] Processing tile ${i + 1}/${tiles.length}...`);
 
         // Report progress
         const percent = Math.round(((i + 1) / tiles.length) * 100);
@@ -1364,7 +1378,7 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         const tileHeight = tileMaxGridY - tileMinGridY + 1;
         const tileTerrainPoints = new Float32Array(tileWidth * tileHeight);
 
-        console.log(`[WebGPU Worker] Tile ${i+1} dense extraction: ${tileWidth}x${tileHeight} from global ${outputWidth}x${outputHeight}`);
+        debug.log(`[WebGPU Worker] Tile ${i+1} dense extraction: ${tileWidth}x${tileHeight} from global ${outputWidth}x${outputHeight}`);
 
         // Copy relevant sub-grid from full terrain
         const EMPTY_CELL = -1e10;
@@ -1405,10 +1419,10 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
             tile: tile
         });
 
-        console.log(`[WebGPU Worker] Tile ${i + 1}/${tiles.length} complete: ${tileToolpathResult.numScanlines}×${tileToolpathResult.pointsPerLine} in ${tileTime.toFixed(1)}ms`);
+        debug.log(`[WebGPU Worker] Tile ${i + 1}/${tiles.length} complete: ${tileToolpathResult.numScanlines}×${tileToolpathResult.pointsPerLine} in ${tileTime.toFixed(1)}ms`);
     }
 
-    console.log(`[WebGPU Worker] All tiles processed in ${totalTileTime.toFixed(1)}ms (avg ${(totalTileTime/tiles.length).toFixed(1)}ms per tile)`);
+    debug.log(`[WebGPU Worker] All tiles processed in ${totalTileTime.toFixed(1)}ms (avg ${(totalTileTime/tiles.length).toFixed(1)}ms per tile)`);
 
     // Stitch tiles together, dropping overlap regions
     const stitchStartTime = performance.now();
@@ -1416,8 +1430,8 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
     const stitchTime = performance.now() - stitchStartTime;
 
     const totalTime = performance.now() - tilingStartTime;
-    console.log(`[WebGPU Worker] Stitching took ${stitchTime.toFixed(1)}ms`);
-    console.log(`[WebGPU Worker] ✅ Tiled toolpath complete: ${stitchedResult.numScanlines}×${stitchedResult.pointsPerLine} in ${totalTime.toFixed(1)}ms total`);
+    debug.log(`[WebGPU Worker] Stitching took ${stitchTime.toFixed(1)}ms`);
+    debug.log(`[WebGPU Worker] ✅ Tiled toolpath complete: ${stitchedResult.numScanlines}×${stitchedResult.pointsPerLine} in ${totalTime.toFixed(1)}ms total`);
 
     // Update generation time to reflect total tiled time
     stitchedResult.generationTime = totalTime;
@@ -1461,7 +1475,7 @@ function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidthCells, too
     const coreGridWidth = Math.ceil(globalGridWidth / tilesX);
     const coreGridHeight = Math.ceil(globalGridHeight / tilesY);
 
-    console.log(`[WebGPU Worker] Creating ${tilesX}×${tilesY} tiles (${coreGridWidth}×${coreGridHeight} cells core + ${toolOverlapX}×${toolOverlapY} cells overlap)`);
+    debug.log(`[WebGPU Worker] Creating ${tilesX}×${tilesY} tiles (${coreGridWidth}×${coreGridHeight} cells core + ${toolOverlapX}×${toolOverlapY} cells overlap)`);
 
     const tiles = [];
     for (let ty = 0; ty < tilesY; ty++) {
@@ -1530,7 +1544,7 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
     const globalPointsPerLine = Math.ceil(globalWidth / xStep);
     const globalNumScanlines = Math.ceil(globalHeight / yStep);
 
-    console.log(`[WebGPU Worker] Stitching toolpath: global grid ${globalWidth}x${globalHeight}, output ${globalPointsPerLine}x${globalNumScanlines}`);
+    debug.log(`[WebGPU Worker] Stitching toolpath: global grid ${globalWidth}x${globalHeight}, output ${globalPointsPerLine}x${globalNumScanlines}`);
 
     const result = new Float32Array(globalPointsPerLine * globalNumScanlines);
     result.fill(NaN);
@@ -1588,7 +1602,7 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
             }
         }
 
-        console.log(`[WebGPU Worker]   Tile ${tile.id}: copied ${copiedCount} values`);
+        debug.log(`[WebGPU Worker]   Tile ${tile.id}: copied ${copiedCount} values`);
     }
 
     // Count how many output values are still NaN (gaps)
@@ -1596,7 +1610,7 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
     for (let i = 0; i < result.length; i++) {
         if (isNaN(result[i])) nanCount++;
     }
-    console.log(`[WebGPU Worker] Stitching complete: ${result.length} total values, ${nanCount} still NaN`);
+    debug.log(`[WebGPU Worker] Stitching complete: ${result.length} total values, ${nanCount} still NaN`);
 
     return {
         pathData: result,
@@ -1610,26 +1624,26 @@ function generateRadialScanline(data) {
     const { stripPositions, stripBounds, toolPositions, xStep, zFloor, gridStep } = data;
     const EMPTY_CELL = -1e10;
 
-    // console.log('[WebGPU Worker] Generating radial scanline...');
-    // console.log(`[WebGPU Worker] Strip: ${stripPositions.length} cells, Tool: ${toolPositions.length/3} points, xStep: ${xStep}`);
+    // debug.log('[WebGPU Worker] Generating radial scanline...');
+    // debug.log(`[WebGPU Worker] Strip: ${stripPositions.length} cells, Tool: ${toolPositions.length/3} points, xStep: ${xStep}`);
 
     // Create height map from strip (dense Z-only format)
     const stripMap = createHeightMapFromPoints(stripPositions, gridStep, stripBounds);
-    // console.log(`[WebGPU Worker] Strip map: ${stripMap.width}x${stripMap.height}`);
+    // debug.log(`[WebGPU Worker] Strip map: ${stripMap.width}x${stripMap.height}`);
 
     // Create sparse tool representation
-    const sparseTool = createSparseToolFromPoints(toolPositions, gridStep);
-    // console.log(`[WebGPU Worker] Sparse tool: ${sparseTool.count} points`);
+    const sparseTool = createSparseToolFromPoints(toolPositions);
+    // debug.log(`[WebGPU Worker] Sparse tool: ${sparseTool.count} points`);
 
     // Find center row (y=0 in world space)
     const centerY = Math.round((0 - stripMap.minY) / gridStep);
 
     if (centerY < 0 || centerY >= stripMap.height) {
-        console.error(`[WebGPU Worker] Center row ${centerY} out of bounds [0, ${stripMap.height})`);
+        debug.error(`[WebGPU Worker] Center row ${centerY} out of bounds [0, ${stripMap.height})`);
         throw new Error('Center row out of strip bounds');
     }
 
-    // console.log(`[WebGPU Worker] Center row: ${centerY} (y=0)`);
+    // debug.log(`[WebGPU Worker] Center row: ${centerY} (y=0)`);
 
     // Calculate output dimensions
     const outputWidth = Math.ceil(stripMap.width / xStep);
@@ -1674,8 +1688,8 @@ function generateRadialScanline(data) {
         scanline[outX] = maxZ;
     }
 
-    // console.log(`[WebGPU Worker] ✅ Radial scanline complete: ${outputWidth} points`);
-    // console.log(`[WebGPU Worker] First 10 values: ${Array.from(scanline.slice(0, 10)).map(v => v.toFixed(2)).join(',')}`);
+    // debug.log(`[WebGPU Worker] ✅ Radial scanline complete: ${outputWidth} points`);
+    // debug.log(`[WebGPU Worker] First 10 values: ${Array.from(scanline.slice(0, 10)).map(v => v.toFixed(2)).join(',')}`);
 
     return {
         scanline
@@ -1709,7 +1723,7 @@ self.onmessage = async function(e) {
 
             case 'update-config':
                 config = data.config;
-                console.log('[WebGPU Worker] Config updated:', config);
+                debug.log('[WebGPU Worker] Config updated:', config);
                 break;
 
             case 'rasterize':
@@ -1749,7 +1763,7 @@ self.onmessage = async function(e) {
                 });
         }
     } catch (error) {
-        console.error('[WebGPU Worker] Error:', error);
+        debug.error('[WebGPU Worker] Error:', error);
         self.postMessage({
             type: 'error',
             message: error.message,
