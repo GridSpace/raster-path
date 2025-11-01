@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebGPU Worker Corruption Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        #log { white-space: pre; background: #f0f0f0; padding: 10px; max-height: 600px; overflow-y: scroll; }
+        .error { color: red; font-weight: bold; }
+        button { padding: 10px; margin: 5px; font-size: 14px; }
+        #status { font-size: 16px; margin: 10px 0; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>WebGPU Worker Corruption Test</h1>
+    <p><strong>Tests WebGPU compute in Web Worker context (where your bug occurs)</strong></p>
+    <p>
+        <strong>Instructions:</strong>
+        Click "Run Test". Resize browser window or open Mission Control (F3) repeatedly.
+    </p>
+
+    <button onclick="runTest()">Run Test (360 iterations)</button>
+    <button onclick="clearLog()">Clear Log</button>
+    <div id="status">Ready</div>
+    <div id="log"></div>
+
+    <script>
+        function log(msg, isError = false) {
+            const div = document.getElementById('log');
+            const span = document.createElement('span');
+            span.textContent = msg + '\n';
+            if (isError) span.className = 'error';
+            div.appendChild(span);
+            div.scrollTop = div.scrollHeight;
+        }
+
+        function updateStatus(msg) {
+            document.getElementById('status').textContent = msg;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+            updateStatus('Ready');
+        }
+
+        async function runTest() {
+            log('=== Starting WebGPU Worker Test ===');
+            updateStatus('Starting worker...');
+
+            // Create worker from inline code
+            const workerCode = `
+                const GRID_SIZE = 549;
+                const TRIANGLE_COUNT = 25000;
+                const ITERATIONS = 360;
+
+                const shaderCode = \`
+                    struct Uniforms {
+                        grid_width: u32,
+                        grid_height: u32,
+                        triangle_count: u32,
+                        iteration: u32,
+                    }
+
+                    @group(0) @binding(0) var<storage, read> triangles: array<vec3<f32>>;
+                    @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+                    @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+                    fn intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> f32 {
+                        let edge1 = v1 - v0;
+                        let edge2 = v2 - v0;
+                        let h = cross(ray_dir, edge2);
+                        let a = dot(edge1, h);
+                        if (abs(a) < 0.00001) { return -1.0; }
+                        let f = 1.0 / a;
+                        let s = ray_origin - v0;
+                        let u = f * dot(s, h);
+                        if (u < 0.0 || u > 1.0) { return -1.0; }
+                        let q = cross(s, edge1);
+                        let v = f * dot(ray_dir, q);
+                        if (v < 0.0 || u + v > 1.0) { return -1.0; }
+                        return f * dot(edge2, q);
+                    }
+
+                    @compute @workgroup_size(16, 16)
+                    fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                        let x = global_id.x;
+                        let y = global_id.y;
+                        if (x >= uniforms.grid_width || y >= uniforms.grid_height) { return; }
+                        let idx = y * uniforms.grid_width + x;
+
+                        let fx = f32(x) * 0.1;
+                        let fy = f32(y) * 0.1;
+                        let ray_origin = vec3<f32>(fx, fy, -100.0);
+                        let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
+
+                        var closest_t = 1e10;
+                        var hit_count = 0u;
+
+                        for (var i = 0u; i < uniforms.triangle_count; i++) {
+                            let tri_base = i * 3u;
+                            let v0 = triangles[tri_base];
+                            let v1 = triangles[tri_base + 1u];
+                            let v2 = triangles[tri_base + 2u];
+                            let t = intersect(ray_origin, ray_dir, v0, v1, v2);
+                            if (t > 0.0 && t < closest_t) {
+                                closest_t = t;
+                                hit_count++;
+                            }
+                        }
+
+                        output[idx] = fx + fy + f32(hit_count) + f32(uniforms.iteration) + 1.0;
+                    }
+                \`;
+
+                let device, adapter, pipeline, triangleBuffer;
+
+                async function init() {
+                    if (!navigator.gpu) {
+                        self.postMessage({ type: 'error', msg: 'WebGPU not available in worker' });
+                        return false;
+                    }
+
+                    adapter = await navigator.gpu.requestAdapter();
+                    device = await adapter.requestDevice();
+
+                    const shaderModule = device.createShaderModule({ code: shaderCode });
+                    pipeline = device.createComputePipeline({
+                        layout: 'auto',
+                        compute: { module: shaderModule, entryPoint: 'main' }
+                    });
+
+                    // Create triangle data
+                    const triangleData = new Float32Array(TRIANGLE_COUNT * 9);
+                    for (let i = 0; i < triangleData.length; i++) {
+                        triangleData[i] = (Math.random() - 0.5) * 200.0;
+                    }
+
+                    triangleBuffer = device.createBuffer({
+                        size: triangleData.byteLength,
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+                    });
+                    device.queue.writeBuffer(triangleBuffer, 0, triangleData);
+
+                    self.postMessage({ type: 'ready', adapter: adapter.name || 'Unknown' });
+                    return true;
+                }
+
+                async function runIteration(iter) {
+                    const totalCells = GRID_SIZE * GRID_SIZE;
+                    const outputSize = totalCells * 4;
+
+                    // NO BUFFER INITIALIZATION - testing the bug
+                    const outputBuffer = device.createBuffer({
+                        size: outputSize,
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+                    });
+
+                    const uniformData = new ArrayBuffer(16);
+                    const uniformU32 = new Uint32Array(uniformData);
+                    uniformU32[0] = GRID_SIZE;
+                    uniformU32[1] = GRID_SIZE;
+                    uniformU32[2] = TRIANGLE_COUNT;
+                    uniformU32[3] = iter;
+
+                    const uniformBuffer = device.createBuffer({
+                        size: 16,
+                        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                    });
+                    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+                    const bindGroup = device.createBindGroup({
+                        layout: pipeline.getBindGroupLayout(0),
+                        entries: [
+                            { binding: 0, resource: { buffer: triangleBuffer } },
+                            { binding: 1, resource: { buffer: outputBuffer } },
+                            { binding: 2, resource: { buffer: uniformBuffer } }
+                        ]
+                    });
+
+                    const commandEncoder = device.createCommandEncoder();
+                    const passEncoder = commandEncoder.beginComputePass();
+                    passEncoder.setPipeline(pipeline);
+                    passEncoder.setBindGroup(0, bindGroup);
+
+                    const workgroupsX = Math.ceil(GRID_SIZE / 16);
+                    const workgroupsY = Math.ceil(GRID_SIZE / 16);
+                    passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+                    passEncoder.end();
+
+                    const stagingBuffer = device.createBuffer({
+                        size: outputSize,
+                        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+                    });
+
+                    commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputSize);
+                    device.queue.submit([commandEncoder.finish()]);
+                    await device.queue.onSubmittedWorkDone();
+
+                    await stagingBuffer.mapAsync(GPUMapMode.READ);
+                    const result = new Float32Array(stagingBuffer.getMappedRange());
+                    const resultCopy = new Float32Array(result);
+                    stagingBuffer.unmap();
+
+                    // Check for zeros (corruption)
+                    let corruptCount = 0;
+                    for (let i = 0; i < totalCells; i++) {
+                        if (resultCopy[i] === 0.0) {
+                            corruptCount++;
+                        }
+                    }
+
+                    outputBuffer.destroy();
+                    uniformBuffer.destroy();
+                    stagingBuffer.destroy();
+
+                    return { iter, corruptCount, totalCells };
+                }
+
+                self.onmessage = async function(e) {
+                    if (e.data.type === 'start') {
+                        const success = await init();
+                        if (!success) return;
+
+                        let totalCorrupted = 0;
+                        let corruptedIterations = 0;
+
+                        for (let iter = 0; iter < ITERATIONS; iter++) {
+                            const result = await runIteration(iter);
+
+                            if (result.corruptCount > 0) {
+                                totalCorrupted += result.corruptCount;
+                                corruptedIterations++;
+                                self.postMessage({
+                                    type: 'corrupt',
+                                    iter: iter + 1,
+                                    count: result.corruptCount,
+                                    total: result.totalCells
+                                });
+                            } else if (iter % 10 === 0) {
+                                self.postMessage({ type: 'progress', iter: iter + 1 });
+                            }
+                        }
+
+                        triangleBuffer.destroy();
+
+                        self.postMessage({
+                            type: 'complete',
+                            corruptedIterations,
+                            totalCorrupted,
+                            totalIterations: ITERATIONS
+                        });
+                    }
+                };
+            `;
+
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+
+            for (let i=0; i<20; i++) {
+                let worker = new Worker(URL.createObjectURL(blob));
+                worker.onmessage = function(e) {
+                    const data = e.data;
+                    if (data.type === 'ready') {
+                        log('Worker initialized: ' + i);
+                    } else if (data.type === 'error') {
+                        log('ERROR: ' + data.msg, true);
+                        updateStatus('Error');
+                    } else if (data.type === 'corrupt') {
+                        const pct = (data.count / data.total * 100).toFixed(3);
+                        log('Worker ' + i + ' Iteration ' + data.iter + ': ' + data.count + ' corrupt cells (' + pct + '%)', true);
+                        updateStatus('Worker ' + i + ' Iteration ' + data.iter + ' - CORRUPTED!');
+                    } else if (data.type === 'progress') {
+                        updateStatus('Worker ' + i + ' Iteration ' + data.iter + '/360');
+                    } else if (data.type === 'complete') {
+                        log('\n=== Test Complete ===');
+                        if (data.corruptedIterations > 0) {
+                            log('Worker ' + i + ' FAILURE: ' + data.corruptedIterations + '/' + data.totalIterations + ' iterations corrupted', true);
+                            log('Worker ' + i + ' Total corrupt cells: ' + data.totalCorrupted.toLocaleString(), true);
+                            updateStatus('Worker ' + i + ' FAILED: ' + data.corruptedIterations + ' corrupted');
+                        } else {
+                            log('Worker ' + i + ' SUCCESS: All ' + data.totalIterations + ' iterations passed');
+                            updateStatus('SUCCESS');
+                        }
+                        worker.terminate();
+                    }
+                };
+                worker.postMessage({ type: 'start' });
+            }
+
+            updateStatus('Running... (trigger F3 now!)');
+        }
+    </script>
+</body>
+</html>
