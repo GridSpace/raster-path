@@ -11,6 +11,9 @@
  * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
  */
 
+const ZMAX = 10e6;
+const WMAX = 0;
+
 const debug = {
     error: console.error,
     warn: console.warn,
@@ -35,6 +38,11 @@ export class RasterPath {
         this.messageId = 0;
         this.deviceCapabilities = null;
 
+        const cores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+            ? navigator.hardwareConcurrency
+            : 4;
+        const maxWorkers = Math.min(WMAX, cores >= 6 ? cores - 2 : cores);
+
         // Configuration with defaults
         this.config = {
             workerName: (config.workerName ?? "webgpu-worker.js") + (debug.silent ? "?silent" : ""),
@@ -43,7 +51,7 @@ export class RasterPath {
             tileOverlapMM: config.tileOverlapMM ?? 10,
             autoTiling: config.autoTiling ?? true,
             minTileSize: config.minTileSize ?? 50,
-            parallelWorkers: config.parallelWorkers ?? 4, // Number of workers for radial mode
+            parallelWorkers: config.parallelWorkers ?? maxWorkers, // for radial mode
         };
     }
 
@@ -325,17 +333,19 @@ export class RasterPath {
                 min: {
                     x: terrainBounds.min.x,
                     y: -toolRadius,
-                    z: terrainBounds.min.z
+                    z: zFloor
                 },
                 max: {
                     x: terrainBounds.max.x,
                     y: toolRadius,
-                    z: terrainBounds.max.z
+                    z: ZMAX
                 }
             };
 
             // 3. Rasterize strip
             const stripRaster = await this.rasterizeMesh(rotatedTriangles, gridStep, 0, stripBounds);
+            const zeros = stripRaster.positions.filter(v => v === 0).length;
+            if (zeros) console.log({ angle, zeros, pct: zeros/stripRaster.positions.length });
 
             // 4. Generate scanline from strip
             const scanlineData = await new Promise((resolve, reject) => {
@@ -487,12 +497,12 @@ export class RasterPath {
                 min: {
                     x: terrainBounds.min.x,
                     y: -toolRadius,
-                    z: terrainBounds.min.z
+                    z: zFloor
                 },
                 max: {
                     x: terrainBounds.max.x,
                     y: toolRadius,
-                    z: terrainBounds.max.z
+                    z: ZMAX
                 }
             };
 

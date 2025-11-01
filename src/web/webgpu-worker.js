@@ -11,6 +11,8 @@ let cachedToolpathShaderModule = null;
 let config = null;
 let deviceCapabilities = null;
 
+const EMPTY_CELL = -1e10;
+
 const debug = {
     error: console.error,
     warn: console.warn,
@@ -559,10 +561,21 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(triangleBuffer, 0, processedTriangles);
+
+    // Create and INITIALIZE output buffer (GPU buffers contain garbage by default!)
     const outputBuffer = device.createBuffer({
         size: outputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+
+    // Initialize output buffer with sentinel value for terrain, zeros for tool
+    // if (filterMode === 0) {
+    //     // Terrain: initialize with EMPTY_CELL sentinel value
+    //     const initData = new Float32Array(totalGridPoints);
+    //     initData.fill(EMPTY_CELL);
+    //     device.queue.writeBuffer(outputBuffer, 0, initData);
+    // }
+    // Tool mode: zeros are fine (will check valid mask)
 
     const validMaskBuffer = device.createBuffer({
         size: totalGridPoints * 4,
@@ -636,7 +649,6 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
 
     // Check dispatch limits
     const maxWorkgroupsPerDim = device.limits.maxComputeWorkgroupsPerDimension || 65535;
-    // debug.log(`[WebGPU Worker] Dispatching ${workgroupsX}x${workgroupsY} workgroups (max per dim: ${maxWorkgroupsPerDim})`);
 
     if (workgroupsX > maxWorkgroupsPerDim || workgroupsY > maxWorkgroupsPerDim) {
         throw new Error(`Workgroup dispatch too large: ${workgroupsX}x${workgroupsY} exceeds limit of ${maxWorkgroupsPerDim}. Try a larger step size.`);
@@ -680,12 +692,15 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         pointCount = totalGridPoints;
 
         // Count actual valid points for logging (sentinel value = -1e10)
-        const EMPTY_CELL = -1e10;
+        let zeroCount = 0;
         let validCount = 0;
         for (let i = 0; i < totalGridPoints; i++) {
             if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
+            if (result[i] === 0) zeroCount++;
         }
-        // debug.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage)`);
+
+        if (zeroCount)
+        debug.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
     } else {
         // Tool: Sparse output (X,Y,Z triplets), compact to remove invalid points
         const validPoints = [];
@@ -724,7 +739,6 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     if (filterMode === 0) {
         // Terrain: Dense Z-only format
         if (result.length > 0) {
-            const EMPTY_CELL = -1e10;
             const firstZ = result[0] <= EMPTY_CELL + 1 ? 'EMPTY' : result[0].toFixed(3);
             const lastZ = result[result.length-1] <= EMPTY_CELL + 1 ? 'EMPTY' : result[result.length-1].toFixed(3);
             // debug.log(`[WebGPU Worker] First Z: ${firstZ}, Last Z: ${lastZ}`);
@@ -851,7 +865,6 @@ function stitchTiles(tileResults, fullBounds, stepSize) {
         const totalGridCells = globalWidth * globalHeight;
 
         // Allocate global dense grid (Z-only), initialize to sentinel value
-        const EMPTY_CELL = -1e10;
         const globalGrid = new Float32Array(totalGridCells);
         globalGrid.fill(EMPTY_CELL);
 
@@ -1379,7 +1392,6 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         debug.log(`[WebGPU Worker] Tile ${i+1} dense extraction: ${tileWidth}x${tileHeight} from global ${outputWidth}x${outputHeight}`);
 
         // Copy relevant sub-grid from full terrain
-        const EMPTY_CELL = -1e10;
         tileTerrainPoints.fill(EMPTY_CELL);
 
         for (let ty = 0; ty < tileHeight; ty++) {
@@ -1620,7 +1632,6 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
 
 function generateRadialScanline(data) {
     const { stripPositions, stripBounds, toolPositions, xStep, zFloor, gridStep } = data;
-    const EMPTY_CELL = -1e10;
 
     // debug.log('[WebGPU Worker] Generating radial scanline...');
     // debug.log(`[WebGPU Worker] Strip: ${stripPositions.length} cells, Tool: ${toolPositions.length/3} points, xStep: ${xStep}`);
