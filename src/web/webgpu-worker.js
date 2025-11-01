@@ -112,8 +112,6 @@ struct Uniforms {
     spatial_grid_width: u32,
     spatial_grid_height: u32,
     spatial_cell_size: f32,
-    rotation_cos: f32,
-    rotation_sin: f32,
 }
 
 @group(0) @binding(0) var<storage, read> triangles: array<f32>;
@@ -122,18 +120,6 @@ struct Uniforms {
 @group(0) @binding(3) var<uniform> uniforms: Uniforms;
 @group(0) @binding(4) var<storage, read> spatial_cell_offsets: array<u32>;
 @group(0) @binding(5) var<storage, read> spatial_triangle_indices: array<u32>;
-
-// Rotate a point around the X-axis
-// X stays the same, Y and Z are rotated
-// Y' = Y*cos(θ) - Z*sin(θ)
-// Z' = Y*sin(θ) + Z*cos(θ)
-fn rotateAroundX(pos: vec3<f32>, cos_angle: f32, sin_angle: f32) -> vec3<f32> {
-    return vec3<f32>(
-        pos.x,
-        pos.y * cos_angle - pos.z * sin_angle,
-        pos.y * sin_angle + pos.z * cos_angle
-    );
-}
 
 // Fast 2D bounding box check for XY plane
 fn ray_hits_triangle_bbox_2d(ray_x: f32, ray_y: f32, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
@@ -256,29 +242,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let tri_idx = spatial_triangle_indices[idx];
         let tri_base = tri_idx * 9u;
 
-        // Read triangle vertices
-        var v0 = vec3<f32>(
+        // Read triangle vertices (already in local space and rotated if needed)
+        let v0 = vec3<f32>(
             triangles[tri_base],
             triangles[tri_base + 1u],
             triangles[tri_base + 2u]
         );
-        var v1 = vec3<f32>(
+        let v1 = vec3<f32>(
             triangles[tri_base + 3u],
             triangles[tri_base + 4u],
             triangles[tri_base + 5u]
         );
-        var v2 = vec3<f32>(
+        let v2 = vec3<f32>(
             triangles[tri_base + 6u],
             triangles[tri_base + 7u],
             triangles[tri_base + 8u]
         );
-
-        // Apply rotation around X-axis if rotation is active (not identity)
-        if (uniforms.rotation_cos != 1.0 || uniforms.rotation_sin != 0.0) {
-            v0 = rotateAroundX(v0, uniforms.rotation_cos, uniforms.rotation_sin);
-            v1 = rotateAroundX(v1, uniforms.rotation_cos, uniforms.rotation_sin);
-            v2 = rotateAroundX(v2, uniforms.rotation_cos, uniforms.rotation_sin);
-        }
 
         let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
         let hit = result.x;
@@ -547,14 +526,39 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
     }
 
-    const spatialGrid = buildSpatialGrid(triangles, bounds);
+    // Apply rotation on CPU if requested (moved from GPU for consistency)
+    const rotationAngleDeg = options.rotationAngleDeg ?? 0;
+    const hasRotation = rotationAngleDeg !== 0;
+
+    let processedTriangles = triangles;
+
+    if (hasRotation) {
+        // Rotate around X-axis on CPU
+        const rad = rotationAngleDeg * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        processedTriangles = new Float32Array(triangles.length);
+        for (let i = 0; i < triangles.length; i += 3) {
+            const x = triangles[i];
+            const y = triangles[i + 1];
+            const z = triangles[i + 2];
+
+            // Rotate around X-axis: X stays same, Y and Z rotate
+            processedTriangles[i] = x;
+            processedTriangles[i + 1] = y * cos - z * sin;
+            processedTriangles[i + 2] = y * sin + z * cos;
+        }
+    }
+
+    const spatialGrid = buildSpatialGrid(processedTriangles, bounds);
 
     // Create buffers
     const triangleBuffer = device.createBuffer({
-        size: triangles.byteLength,
+        size: processedTriangles.byteLength,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(triangleBuffer, 0, triangles);
+    device.queue.writeBuffer(triangleBuffer, 0, processedTriangles);
     const outputBuffer = device.createBuffer({
         size: outputSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -582,23 +586,17 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         bounds.min.x, bounds.min.y, bounds.min.z,
         bounds.max.x, bounds.max.y, bounds.max.z,
         stepSize,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0  // Extended for rotation_cos and rotation_sin
+        0, 0, 0, 0, 0, 0, 0  // Padding for alignment
     ]);
     const uniformDataU32 = new Uint32Array(uniformData.buffer);
     uniformDataU32[7] = gridWidth;
     uniformDataU32[8] = gridHeight;
-    uniformDataU32[9] = triangles.length / 9;
+    uniformDataU32[9] = processedTriangles.length / 9;
     uniformDataU32[10] = filterMode;
     uniformDataU32[11] = spatialGrid.gridWidth;
     uniformDataU32[12] = spatialGrid.gridHeight;
     const uniformDataF32 = new Float32Array(uniformData.buffer);
     uniformDataF32[13] = spatialGrid.cellSize;
-
-    // Set rotation (identity by default: cos=1, sin=0)
-    const rotationAngleDeg = options.rotationAngleDeg ?? 0;
-    const rotationAngleRad = rotationAngleDeg * Math.PI / 180;
-    uniformDataF32[14] = Math.cos(rotationAngleRad);
-    uniformDataF32[15] = Math.sin(rotationAngleRad);
 
     // Check for u32 overflow
     const maxU32 = 4294967295;
