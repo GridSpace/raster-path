@@ -50,7 +50,7 @@
             // Create worker from inline code
             const workerCode = `
                 const GRID_SIZE = 549;
-                const TRIANGLE_COUNT = 50000;
+                const TRIANGLE_COUNT = 150000;
                 const ITERATIONS = 360;
 
                 const shaderCode = \`
@@ -255,7 +255,7 @@
 
             const blob = new Blob([workerCode], { type: 'application/javascript' });
 
-            for (let i=0; i<20; i++) {
+            for (let i=0; i<1; i++) {
                 let worker = new Worker(URL.createObjectURL(blob));
                 worker.onmessage = function(e) {
                     const data = e.data;

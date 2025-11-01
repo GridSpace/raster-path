@@ -12,18 +12,13 @@
  */
 
 const ZMAX = 10e6;
-const WMAX = 20;
+const WMAX = 4;
 
 const debug = {
     error: console.error,
     warn: console.warn,
-    log: console.log,
-    silent: true
+    log: console.log
 };
-
-if (debug.silent) {
-    debug.log = function() {};
-}
 
 /**
  * Main class for rasterizing geometry and generating toolpaths using WebGPU
@@ -32,7 +27,7 @@ if (debug.silent) {
 export class RasterPath {
     constructor(config = {}) {
         this.worker = null;
-        this.workerPool = []; // Pool of workers for parallel processing
+        this.workerPool = []; // Pool of workers for radial processing
         this.isInitialized = false;
         this.messageHandlers = new Map();
         this.messageId = 0;
@@ -43,15 +38,24 @@ export class RasterPath {
             : 4;
         const maxWorkers = Math.min(WMAX, cores >= 6 ? cores - 2 : cores);
 
+        let urlOpt = [];
+        if (config.quiet) {
+            debug.log = function() {};
+            urlOpt.push('quiet');
+        }
+        if (config.debug) {
+            urlOpt.push('debug');
+        }
+
         // Configuration with defaults
         this.config = {
-            workerName: (config.workerName ?? "webgpu-worker.js") + (debug.silent ? "?silent" : ""),
+            workerName: (config.workerName ?? "webgpu-worker.js") + (urlOpt.length ? "?"+urlOpt.join('&') : ""),
             maxGPUMemoryMB: config.maxGPUMemoryMB ?? 256,
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             tileOverlapMM: config.tileOverlapMM ?? 10,
             autoTiling: config.autoTiling ?? true,
             minTileSize: config.minTileSize ?? 50,
-            parallelWorkers: config.parallelWorkers ?? maxWorkers, // for radial mode
+            maxWorkers: config.maxWorkers ?? maxWorkers, // for radial mode only
         };
     }
 
@@ -114,7 +118,7 @@ export class RasterPath {
             return true; // Already initialized
         }
 
-        const numWorkers = this.config.parallelWorkers;
+        const numWorkers = this.config.maxWorkers;
         debug.log(`[RasterPath] Initializing worker pool with ${numWorkers} workers...`);
 
         const workerName = this.config.workerName;

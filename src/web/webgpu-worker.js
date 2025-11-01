@@ -13,16 +13,16 @@ let deviceCapabilities = null;
 
 const EMPTY_CELL = -1e10;
 
+// url params to control logging
+let { search } = self.location;
+let verbose = search.indexOf('debug') >= 0;
+let quiet = search.indexOf('quiet') >= 0;
+
 const debug = {
     error: console.error,
     warn: console.warn,
-    log: console.log,
+    log: quiet ? function(){} : console.log
 };
-
-// url param to silence debug output
-if (self.location.search.slice(1) === 'silent') {
-    debug.log = function() {};
-}
 
 // Initialize WebGPU device in worker context
 async function initWebGPU() {
@@ -691,16 +691,18 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         result = new Float32Array(outputData);
         pointCount = totalGridPoints;
 
-        // Count actual valid points for logging (sentinel value = -1e10)
-        let zeroCount = 0;
-        let validCount = 0;
-        for (let i = 0; i < totalGridPoints; i++) {
-            if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
-            if (result[i] === 0) zeroCount++;
-        }
+        if (verbose) {
+            // Count valid points for logging (sentinel value = -1e10)
+            let zeroCount = 0;
+            let validCount = 0;
+            for (let i = 0; i < totalGridPoints; i++) {
+                if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
+                if (result[i] === 0) zeroCount++;
+            }
 
-        if (zeroCount > 0) {
-            debug.warn(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
+            if (zeroCount > 0) {
+                debug.warn(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
+            }
         }
     } else {
         // Tool: Sparse output (X,Y,Z triplets), compact to remove invalid points
@@ -1298,6 +1300,143 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     };
 }
 
+// Create reusable GPU buffers for tiled toolpath generation
+function createReusableToolpathBuffers(terrainWidth, terrainHeight, sparseToolData, xStep, yStep) {
+    const pointsPerLine = Math.ceil(terrainWidth / xStep);
+    const numScanlines = Math.ceil(terrainHeight / yStep);
+    const outputSize = pointsPerLine * numScanlines;
+
+    // Create terrain buffer (will be updated for each tile)
+    const terrainBuffer = device.createBuffer({
+        size: terrainWidth * terrainHeight * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create tool buffer (STATIC - same for all tiles!)
+    const toolBufferData = new ArrayBuffer(sparseToolData.count * 16);
+    const toolBufferI32 = new Int32Array(toolBufferData);
+    const toolBufferF32 = new Float32Array(toolBufferData);
+
+    for (let i = 0; i < sparseToolData.count; i++) {
+        toolBufferI32[i * 4 + 0] = sparseToolData.xOffsets[i];
+        toolBufferI32[i * 4 + 1] = sparseToolData.yOffsets[i];
+        toolBufferF32[i * 4 + 2] = sparseToolData.zValues[i];
+        toolBufferF32[i * 4 + 3] = 0;
+    }
+
+    const toolBuffer = device.createBuffer({
+        size: toolBufferData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(toolBuffer, 0, toolBufferData);  // Write once!
+
+    // Create output buffer (will be read for each tile)
+    const outputBuffer = device.createBuffer({
+        size: outputSize * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    // Create uniform buffer (will be updated for each tile)
+    const uniformBuffer = device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create staging buffer (will be reused for readback)
+    const stagingBuffer = device.createBuffer({
+        size: outputSize * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    return {
+        terrainBuffer,
+        toolBuffer,
+        outputBuffer,
+        uniformBuffer,
+        stagingBuffer,
+        maxOutputSize: outputSize,
+        maxTerrainWidth: terrainWidth,
+        maxTerrainHeight: terrainHeight,
+        sparseToolData
+    };
+}
+
+// Destroy reusable GPU buffers
+function destroyReusableToolpathBuffers(buffers) {
+    buffers.terrainBuffer.destroy();
+    buffers.toolBuffer.destroy();
+    buffers.outputBuffer.destroy();
+    buffers.uniformBuffer.destroy();
+    buffers.stagingBuffer.destroy();
+}
+
+// Run toolpath compute using pre-created reusable buffers
+async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainHeight, xStep, yStep, oobZ, buffers, startTime) {
+    // Update terrain buffer with new tile data
+    device.queue.writeBuffer(buffers.terrainBuffer, 0, terrainData);
+
+    // Calculate output dimensions
+    const pointsPerLine = Math.ceil(terrainWidth / xStep);
+    const numScanlines = Math.ceil(terrainHeight / yStep);
+    const outputSize = pointsPerLine * numScanlines;
+
+    // Update uniforms for this tile
+    const uniformData = new Uint32Array([
+        terrainWidth,
+        terrainHeight,
+        buffers.sparseToolData.count,
+        xStep,
+        yStep,
+        0,
+        pointsPerLine,
+        numScanlines,
+    ]);
+    const uniformDataFloat = new Float32Array(uniformData.buffer);
+    uniformDataFloat[5] = oobZ;
+    device.queue.writeBuffer(buffers.uniformBuffer, 0, uniformData);
+
+    // Create bind group (reusing cached pipeline)
+    const bindGroup = device.createBindGroup({
+        layout: cachedToolpathPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: buffers.terrainBuffer } },
+            { binding: 1, resource: { buffer: buffers.toolBuffer } },
+            { binding: 2, resource: { buffer: buffers.outputBuffer } },
+            { binding: 3, resource: { buffer: buffers.uniformBuffer } },
+        ],
+    });
+
+    // Dispatch compute shader
+    const commandEncoder = device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(cachedToolpathPipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+
+    const workgroupsX = Math.ceil(pointsPerLine / 16);
+    const workgroupsY = Math.ceil(numScanlines / 16);
+    passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+    passEncoder.end();
+
+    // Copy to staging buffer
+    commandEncoder.copyBufferToBuffer(buffers.outputBuffer, 0, buffers.stagingBuffer, 0, outputSize * 4);
+
+    device.queue.submit([commandEncoder.finish()]);
+    await buffers.stagingBuffer.mapAsync(GPUMapMode.READ);
+
+    const outputData = new Float32Array(buffers.stagingBuffer.getMappedRange().slice(0, outputSize * 4));
+    const result = new Float32Array(outputData);
+    buffers.stagingBuffer.unmap();
+
+    const endTime = performance.now();
+
+    return {
+        pathData: result,
+        numScanlines,
+        pointsPerLine,
+        generationTime: endTime - startTime
+    };
+}
+
 // Generate toolpath with tiling support (public API)
 async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
     // Calculate bounds if not provided
@@ -1357,10 +1496,68 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
     debug.log(`[WebGPU Worker] Tool dimensions: ${toolWidthMm.toFixed(2)}mm × ${toolHeightMm.toFixed(2)}mm (${toolWidthCells}×${toolHeightCells} cells)`);
 
     // Create tiles with tool-size overlap (pass dimensions in grid cells)
-    const tiles = createToolpathTiles(terrainBounds, gridStep, xStep, yStep, toolWidthCells, toolHeightCells, maxSafeSize);
+    const { tiles, maxTileGridWidth, maxTileGridHeight } = createToolpathTiles(terrainBounds, gridStep, xStep, yStep, toolWidthCells, toolHeightCells, maxSafeSize);
     debug.log(`[WebGPU Worker] Created ${tiles.length} tiles`);
 
-    // Process each tile
+    // Pre-generate all tile terrain point arrays
+    const pregenStartTime = performance.now();
+    debug.log(`[WebGPU Worker] Pre-generating ${tiles.length} tile terrain arrays...`);
+    const allTileTerrainPoints = [];
+
+    for (let i = 0; i < tiles.length; i++) {
+        const tile = tiles[i];
+
+        // Extract terrain sub-grid for this tile (terrain is ALWAYS dense)
+        const tileMinGridX = Math.floor((tile.bounds.min.x - terrainBounds.min.x) / gridStep);
+        const tileMaxGridX = Math.ceil((tile.bounds.max.x - terrainBounds.min.x) / gridStep);
+        const tileMinGridY = Math.floor((tile.bounds.min.y - terrainBounds.min.y) / gridStep);
+        const tileMaxGridY = Math.ceil((tile.bounds.max.y - terrainBounds.min.y) / gridStep);
+
+        const tileWidth = tileMaxGridX - tileMinGridX + 1;
+        const tileHeight = tileMaxGridY - tileMinGridY + 1;
+
+        // Pad to max dimensions for consistent buffer sizing
+        const paddedTileTerrainPoints = new Float32Array(maxTileGridWidth * maxTileGridHeight);
+        paddedTileTerrainPoints.fill(EMPTY_CELL);
+
+        // Copy relevant sub-grid from full terrain into top-left of padded array
+        for (let ty = 0; ty < tileHeight; ty++) {
+            const globalY = tileMinGridY + ty;
+            if (globalY < 0 || globalY >= outputHeight) continue;
+
+            for (let tx = 0; tx < tileWidth; tx++) {
+                const globalX = tileMinGridX + tx;
+                if (globalX < 0 || globalX >= outputWidth) continue;
+
+                const globalIdx = globalY * outputWidth + globalX;
+                const tileIdx = ty * maxTileGridWidth + tx;  // Use maxTileGridWidth for stride
+                paddedTileTerrainPoints[tileIdx] = terrainPoints[globalIdx];
+            }
+        }
+
+        allTileTerrainPoints.push({
+            data: paddedTileTerrainPoints,
+            actualWidth: tileWidth,
+            actualHeight: tileHeight
+        });
+    }
+
+    const pregenTime = performance.now() - pregenStartTime;
+    debug.log(`[WebGPU Worker] Pre-generation complete in ${pregenTime.toFixed(1)}ms`);
+
+    // Create reusable GPU buffers (sized for maximum tile)
+    if (!isInitialized) {
+        const success = await initWebGPU();
+        if (!success) {
+            throw new Error('WebGPU not available');
+        }
+    }
+
+    const sparseToolData = createSparseToolFromPoints(toolPoints);
+    const reusableBuffers = createReusableToolpathBuffers(maxTileGridWidth, maxTileGridHeight, sparseToolData, xStep, yStep);
+    debug.log(`[WebGPU Worker] Created reusable GPU buffers for ${maxTileGridWidth}x${maxTileGridHeight} tiles`);
+
+    // Process each tile with reusable buffers
     const tileResults = [];
     let totalTileTime = 0;
     for (let i = 0; i < tiles.length; i++) {
@@ -1380,44 +1577,18 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
             }
         });
 
-        // Extract terrain sub-grid for this tile (terrain is ALWAYS dense)
-        const tileMinGridX = Math.floor((tile.bounds.min.x - terrainBounds.min.x) / gridStep);
-        const tileMaxGridX = Math.ceil((tile.bounds.max.x - terrainBounds.min.x) / gridStep);
-        const tileMinGridY = Math.floor((tile.bounds.min.y - terrainBounds.min.y) / gridStep);
-        const tileMaxGridY = Math.ceil((tile.bounds.max.y - terrainBounds.min.y) / gridStep);
+        debug.log(`[WebGPU Worker] Tile ${i+1} using pre-generated terrain: ${allTileTerrainPoints[i].actualWidth}x${allTileTerrainPoints[i].actualHeight} (padded to ${maxTileGridWidth}x${maxTileGridHeight})`);
 
-        const tileWidth = tileMaxGridX - tileMinGridX + 1;
-        const tileHeight = tileMaxGridY - tileMinGridY + 1;
-        const tileTerrainPoints = new Float32Array(tileWidth * tileHeight);
-
-        debug.log(`[WebGPU Worker] Tile ${i+1} dense extraction: ${tileWidth}x${tileHeight} from global ${outputWidth}x${outputHeight}`);
-
-        // Copy relevant sub-grid from full terrain
-        tileTerrainPoints.fill(EMPTY_CELL);
-
-        for (let ty = 0; ty < tileHeight; ty++) {
-            const globalY = tileMinGridY + ty;
-            if (globalY < 0 || globalY >= outputHeight) continue;
-
-            for (let tx = 0; tx < tileWidth; tx++) {
-                const globalX = tileMinGridX + tx;
-                if (globalX < 0 || globalX >= outputWidth) continue;
-
-                const globalIdx = globalY * outputWidth + globalX;
-                const tileIdx = ty * tileWidth + tx;
-                tileTerrainPoints[tileIdx] = terrainPoints[globalIdx];
-            }
-        }
-
-        // Generate toolpath for this tile
-        const tileToolpathResult = await generateToolpathSingle(
-            tileTerrainPoints,
-            toolPoints,
+        // Generate toolpath for this tile using reusable buffers
+        const tileToolpathResult = await runToolpathComputeWithBuffers(
+            allTileTerrainPoints[i].data,
+            maxTileGridWidth,
+            maxTileGridHeight,
             xStep,
             yStep,
             oobZ,
-            gridStep,
-            tile.bounds
+            reusableBuffers,
+            tileStartTime
         );
 
         const tileTime = performance.now() - tileStartTime;
@@ -1432,6 +1603,9 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
 
         debug.log(`[WebGPU Worker] Tile ${i + 1}/${tiles.length} complete: ${tileToolpathResult.numScanlines}×${tileToolpathResult.pointsPerLine} in ${tileTime.toFixed(1)}ms`);
     }
+
+    // Cleanup reusable buffers
+    destroyReusableToolpathBuffers(reusableBuffers);
 
     debug.log(`[WebGPU Worker] All tiles processed in ${totalTileTime.toFixed(1)}ms (avg ${(totalTileTime/tiles.length).toFixed(1)}ms per tile)`);
 
@@ -1486,7 +1660,12 @@ function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidthCells, too
     const coreGridWidth = Math.ceil(globalGridWidth / tilesX);
     const coreGridHeight = Math.ceil(globalGridHeight / tilesY);
 
+    // Calculate maximum tile dimensions (for buffer sizing)
+    const maxTileGridWidth = coreGridWidth + 2 * toolOverlapX;
+    const maxTileGridHeight = coreGridHeight + 2 * toolOverlapY;
+
     debug.log(`[WebGPU Worker] Creating ${tilesX}×${tilesY} tiles (${coreGridWidth}×${coreGridHeight} cells core + ${toolOverlapX}×${toolOverlapY} cells overlap)`);
+    debug.log(`[WebGPU Worker] Max tile dimensions: ${maxTileGridWidth}×${maxTileGridHeight} cells (for buffer sizing)`);
 
     const tiles = [];
     for (let ty = 0; ty < tilesY; ty++) {
@@ -1515,6 +1694,10 @@ function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidthCells, too
             extGridEndX = Math.min(globalGridWidth - 1, extGridEndX);
             extGridEndY = Math.min(globalGridHeight - 1, extGridEndY);
 
+            // Calculate actual dimensions for this tile
+            const tileGridWidth = extGridEndX - extGridStartX + 1;
+            const tileGridHeight = extGridEndY - extGridStartY + 1;
+
             // Convert grid coordinates to world coordinates
             const extMinX = bounds.min.x + extGridStartX * gridStep;
             const extMinY = bounds.min.y + extGridStartY * gridStep;
@@ -1530,6 +1713,8 @@ function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidthCells, too
                 id: `tile_${tx}_${ty}`,
                 tx, ty,
                 tilesX, tilesY,
+                gridWidth: tileGridWidth,
+                gridHeight: tileGridHeight,
                 bounds: {
                     min: { x: extMinX, y: extMinY, z: bounds.min.z },
                     max: { x: extMaxX, y: extMaxY, z: bounds.max.z }
@@ -1544,7 +1729,7 @@ function createToolpathTiles(bounds, gridStep, xStep, yStep, toolWidthCells, too
         }
     }
 
-    return tiles;
+    return { tiles, maxTileGridWidth, maxTileGridHeight };
 }
 
 // Stitch toolpath tiles together, dropping overlap regions (using integer grid coordinates)

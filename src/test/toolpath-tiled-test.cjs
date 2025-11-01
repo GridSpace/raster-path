@@ -56,7 +56,7 @@ function createWindow() {
                     type: 'init',
                     data: {
                         config: {
-                            maxGPUMemoryMB: 128,  // Force exactly 4 tiles (2x2)
+                            maxGPUMemoryMB: 32,  // Force 16 tiles (4x4) for aggressive tiling
                             gpuMemorySafetyMargin: 0.8,
                             autoTiling: true
                         }
