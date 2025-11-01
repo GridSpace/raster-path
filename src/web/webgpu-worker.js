@@ -699,8 +699,9 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
             if (result[i] === 0) zeroCount++;
         }
 
-        if (zeroCount)
-        debug.log(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
+        if (zeroCount > 0) {
+            debug.warn(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
+        }
     } else {
         // Tool: Sparse output (X,Y,Z triplets), compact to remove invalid points
         const validPoints = [];

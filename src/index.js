@@ -12,13 +12,13 @@
  */
 
 const ZMAX = 10e6;
-const WMAX = 0;
+const WMAX = 20;
 
 const debug = {
     error: console.error,
     warn: console.warn,
     log: console.log,
-    silent: false
+    silent: true
 };
 
 if (debug.silent) {
