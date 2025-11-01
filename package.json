@@ -34,7 +34,8 @@
     "test:radial": "npm run build && electron src/test/radial-toolpath-test.cjs",
     "test:radial-padding": "npm run build && electron src/test/radial-padding-test.cjs",
     "test:radial-benchmark": "npm run build && electron src/test/radial-production-benchmark.cjs",
-    "test:planar-vs-radial": "npm run build && electron src/test/planar-vs-radial-test.cjs"
+    "test:planar-vs-radial": "npm run build && electron src/test/planar-vs-radial-test.cjs",
+    "test:batch-rasterize": "npm run build && electron src/test/batch-rasterize-test.cjs"
   },
   "keywords": [
     "cnc",

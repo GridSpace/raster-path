@@ -477,6 +477,218 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     };
 }
 
+// Create reusable GPU buffers for multiple rasterization passes (e.g., radial rotations)
+function createReusableRasterizeBuffers(triangles, stepSize, filterMode, bounds) {
+    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / stepSize) + 1;
+    const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
+    const totalGridPoints = gridWidth * gridHeight;
+    const floatsPerPoint = filterMode === 0 ? 1 : 3;
+    const outputSize = totalGridPoints * floatsPerPoint * 4;
+
+    // Triangle buffer (static size, will be rewritten)
+    const triangleBuffer = device.createBuffer({
+        size: triangles.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // Output buffer (reused across rotations)
+    const outputBuffer = device.createBuffer({
+        size: outputSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+
+    // Valid mask buffer (reused)
+    const validMaskBuffer = device.createBuffer({
+        size: totalGridPoints * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    // Spatial grid buffers (size for worst case - all triangles in all cells)
+    const triangleCount = triangles.length / 9;
+    const spatialGridSize = Math.max(16, Math.ceil(Math.sqrt(triangleCount / 10))); // Heuristic
+    const maxSpatialCells = spatialGridSize * spatialGridSize;
+    const maxSpatialRefs = triangleCount * 4; // Assume each triangle in ~4 cells max
+
+    const spatialCellOffsetsBuffer = device.createBuffer({
+        size: (maxSpatialCells + 1) * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    const spatialTriangleIndicesBuffer = device.createBuffer({
+        size: maxSpatialRefs * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // Uniform buffer (reused, will be updated)
+    const uniformBuffer = device.createBuffer({
+        size: 64,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Staging buffers for readback
+    const stagingOutputBuffer = device.createBuffer({
+        size: outputSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    const stagingValidMaskBuffer = device.createBuffer({
+        size: totalGridPoints * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    return {
+        triangleBuffer,
+        outputBuffer,
+        validMaskBuffer,
+        spatialCellOffsetsBuffer,
+        spatialTriangleIndicesBuffer,
+        uniformBuffer,
+        stagingOutputBuffer,
+        stagingValidMaskBuffer,
+        gridWidth,
+        gridHeight,
+        totalGridPoints,
+        floatsPerPoint,
+        outputSize,
+        filterMode,
+        bounds,
+        stepSize
+    };
+}
+
+// Destroy reusable rasterize buffers
+function destroyReusableRasterizeBuffers(buffers) {
+    buffers.triangleBuffer.destroy();
+    buffers.outputBuffer.destroy();
+    buffers.validMaskBuffer.destroy();
+    buffers.spatialCellOffsetsBuffer.destroy();
+    buffers.spatialTriangleIndicesBuffer.destroy();
+    buffers.uniformBuffer.destroy();
+    buffers.stagingOutputBuffer.destroy();
+    buffers.stagingValidMaskBuffer.destroy();
+}
+
+// Rasterize using pre-created reusable buffers
+async function rasterizeMeshWithBuffers(triangles, rotationAngleDeg, buffers, startTime) {
+    // Rotate triangles on CPU if needed
+    let processedTriangles = triangles;
+    if (rotationAngleDeg !== 0) {
+        const rad = rotationAngleDeg * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        processedTriangles = new Float32Array(triangles.length);
+        for (let i = 0; i < triangles.length; i += 3) {
+            const x = triangles[i];
+            const y = triangles[i + 1];
+            const z = triangles[i + 2];
+            processedTriangles[i] = x;
+            processedTriangles[i + 1] = y * cos - z * sin;
+            processedTriangles[i + 2] = y * sin + z * cos;
+        }
+    }
+
+    // Write triangle data
+    device.queue.writeBuffer(buffers.triangleBuffer, 0, processedTriangles);
+
+    // Build spatial grid
+    const spatialGrid = buildSpatialGrid(processedTriangles, buffers.bounds);
+    device.queue.writeBuffer(buffers.spatialCellOffsetsBuffer, 0, spatialGrid.cellOffsets);
+    device.queue.writeBuffer(buffers.spatialTriangleIndicesBuffer, 0, spatialGrid.triangleIndices);
+
+    // Update uniforms
+    const uniformData = new Float32Array([
+        buffers.bounds.min.x, buffers.bounds.min.y, buffers.bounds.min.z,
+        buffers.bounds.max.x, buffers.bounds.max.y, buffers.bounds.max.z,
+        buffers.stepSize,
+        0, 0, 0, 0, 0, 0, 0
+    ]);
+    const uniformDataU32 = new Uint32Array(uniformData.buffer);
+    uniformDataU32[7] = buffers.gridWidth;
+    uniformDataU32[8] = buffers.gridHeight;
+    uniformDataU32[9] = processedTriangles.length / 9;
+    uniformDataU32[10] = buffers.filterMode;
+    uniformDataU32[11] = spatialGrid.gridWidth;
+    uniformDataU32[12] = spatialGrid.gridHeight;
+    const uniformDataF32 = new Float32Array(uniformData.buffer);
+    uniformDataF32[13] = spatialGrid.cellSize;
+    device.queue.writeBuffer(buffers.uniformBuffer, 0, uniformData);
+
+    // Create bind group
+    const bindGroup = device.createBindGroup({
+        layout: cachedRasterizePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: buffers.triangleBuffer } },
+            { binding: 1, resource: { buffer: buffers.outputBuffer } },
+            { binding: 2, resource: { buffer: buffers.validMaskBuffer } },
+            { binding: 3, resource: { buffer: buffers.uniformBuffer } },
+            { binding: 4, resource: { buffer: buffers.spatialCellOffsetsBuffer } },
+            { binding: 5, resource: { buffer: buffers.spatialTriangleIndicesBuffer } },
+        ],
+    });
+
+    // Dispatch compute shader
+    const commandEncoder = device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(cachedRasterizePipeline);
+    passEncoder.setBindGroup(0, bindGroup);
+
+    const workgroupsX = Math.ceil(buffers.gridWidth / 16);
+    const workgroupsY = Math.ceil(buffers.gridHeight / 16);
+    passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
+    passEncoder.end();
+
+    // Copy to staging
+    commandEncoder.copyBufferToBuffer(buffers.outputBuffer, 0, buffers.stagingOutputBuffer, 0, buffers.outputSize);
+    commandEncoder.copyBufferToBuffer(buffers.validMaskBuffer, 0, buffers.stagingValidMaskBuffer, 0, buffers.totalGridPoints * 4);
+
+    device.queue.submit([commandEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    // Read back results
+    await buffers.stagingOutputBuffer.mapAsync(GPUMapMode.READ);
+    await buffers.stagingValidMaskBuffer.mapAsync(GPUMapMode.READ);
+
+    const outputData = new Float32Array(buffers.stagingOutputBuffer.getMappedRange());
+    const validMaskData = new Uint32Array(buffers.stagingValidMaskBuffer.getMappedRange());
+
+    let result, pointCount;
+
+    if (buffers.filterMode === 0) {
+        // Terrain: Dense output
+        result = new Float32Array(outputData);
+        pointCount = buffers.totalGridPoints;
+    } else {
+        // Tool: Sparse output
+        const validPoints = [];
+        for (let i = 0; i < buffers.totalGridPoints; i++) {
+            if (validMaskData[i] === 1) {
+                validPoints.push(
+                    outputData[i * 3],
+                    outputData[i * 3 + 1],
+                    outputData[i * 3 + 2]
+                );
+            }
+        }
+        result = new Float32Array(validPoints);
+        pointCount = validPoints.length / 3;
+    }
+
+    buffers.stagingOutputBuffer.unmap();
+    buffers.stagingValidMaskBuffer.unmap();
+
+    const endTime = performance.now();
+
+    return {
+        positions: result,
+        pointCount: pointCount,
+        bounds: buffers.bounds,
+        conversionTime: endTime - startTime,
+        gridWidth: buffers.gridWidth,
+        gridHeight: buffers.gridHeight,
+        isDense: buffers.filterMode === 0
+    };
+}
+
 // Rasterize mesh to point cloud
 // Internal function - rasterize without tiling (do not modify this function!)
 async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}) {
@@ -1930,6 +2142,57 @@ self.onmessage = async function(e) {
                     data: rasterResult,
                     isForTool: isForTool || false // Pass through the flag
                 }, [rasterResult.positions.buffer]);
+                break;
+
+            case 'rasterize-batch':
+                // Batch rasterization with buffer reuse (for radial toolpath)
+                const { triangles: batchTriangles, stepSize: batchStep, filterMode: batchFilter,
+                        rotationAngles, boundsOverride: batchBounds, isForTool: batchIsForTool } = data;
+
+                if (!isInitialized) {
+                    const success = await initWebGPU();
+                    if (!success) {
+                        throw new Error('WebGPU not available');
+                    }
+                }
+
+                const bounds = batchBounds || calculateBounds(batchTriangles);
+                const batchStartTime = performance.now();
+
+                debug.log(`[WebGPU Worker] Batch rasterization: ${rotationAngles.length} angles with buffer reuse`);
+
+                // Create reusable buffers once
+                const rasterBuffers = createReusableRasterizeBuffers(batchTriangles, batchStep, batchFilter, bounds);
+
+                // Rasterize at each angle
+                const batchResults = [];
+                for (let i = 0; i < rotationAngles.length; i++) {
+                    const angleStartTime = performance.now();
+                    const result = await rasterizeMeshWithBuffers(batchTriangles, rotationAngles[i], rasterBuffers, angleStartTime);
+                    batchResults.push(result);
+
+                    // Report progress
+                    if ((i + 1) % 10 === 0 || i === rotationAngles.length - 1) {
+                        debug.log(`[WebGPU Worker]   Rasterized ${i + 1}/${rotationAngles.length} angles (${result.conversionTime.toFixed(1)}ms)`);
+                    }
+                }
+
+                // Cleanup buffers once
+                destroyReusableRasterizeBuffers(rasterBuffers);
+
+                const batchTotalTime = performance.now() - batchStartTime;
+                const avgPerAngle = batchTotalTime / rotationAngles.length;
+                debug.log(`[WebGPU Worker] ✅ Batch complete: ${rotationAngles.length} angles in ${batchTotalTime.toFixed(1)}ms (avg ${avgPerAngle.toFixed(1)}ms/angle)`);
+
+                self.postMessage({
+                    type: 'rasterize-batch-complete',
+                    data: {
+                        results: batchResults,
+                        totalTime: batchTotalTime,
+                        anglesProcessed: rotationAngles.length
+                    },
+                    isForTool: batchIsForTool || false
+                });
                 break;
 
             case 'generate-toolpath':
