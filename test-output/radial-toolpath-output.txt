@@ -1,10 +1,10 @@
 {
-  "timestamp": "2025-11-01T17:53:24.685Z",
+  "timestamp": "2025-11-01T23:50:23.323Z",
   "success": true,
   "numRotations": 360,
   "pointsPerLine": 1501,
   "totalPoints": 540360,
-  "generationTime": 40799,
+  "generationTime": 6161.10000038147,
   "zRange": {
     "min": -0.5797847509384155,
     "max": 41.57028579711914

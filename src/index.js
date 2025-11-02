@@ -277,7 +277,8 @@ export class RasterPath {
      * @param {number} zFloor - Z floor value for out-of-bounds
      * @param {number} gridStep - Rasterization resolution
      * @param {object} terrainBounds - Terrain bounding box {min: {x,y,z}, max: {x,y,z}}
-     * @param {object} options - Optional settings {onProgress: (percent, info) => {}}
+     * @param {object} options - Optional settings {onProgress: (percent, info) => {}, batch: true/false}
+     *                           batch: Use GPU buffer reuse for better stability (default: true)
      * @returns {Promise<{pathData: Float32Array, numRotations: number, pointsPerLine: number, rotationStepDegrees: number, generationTime: number}>}
      */
     async generateRadialToolpath(terrainTriangles, toolPositions, xRotationStep, xStep, zFloor, gridStep, terrainBounds, options = {}) {
@@ -301,8 +302,10 @@ export class RasterPath {
             angles.push(angle);
         }
 
+        const useBatch = options.batch !== false;  // Default to true
         debug.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
         debug.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
+        debug.log(`Buffer reuse: ${useBatch ? 'ENABLED' : 'DISABLED'}`);
 
         // Use Phase 2A (parallel workers with GPU rotation)
         // Splits rotations across workers for excellent performance (5-6 seconds for 360 rotations)
@@ -451,7 +454,8 @@ export class RasterPath {
                 gridStep,
                 terrainBounds,
                 toolRadius,
-                progressCallback
+                progressCallback,
+                options
             )
         );
 
@@ -490,69 +494,129 @@ export class RasterPath {
      * Process rotations for a single worker
      * Internal method - processes a subset of angles in one worker
      */
-    async _processWorkerRotations(workerState, workerIdx, terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, progressCallback = null) {
+    async _processWorkerRotations(workerState, workerIdx, terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, progressCallback = null, options = {}) {
         const scanlines = [];
+        const useBatch = options.batch !== false;  // Default to true
 
-        for (let i = 0; i < angles.length; i++) {
-            const angle = angles[i];
+        // Define strip bounds (narrow band for rasterization)
+        const stripBounds = {
+            min: {
+                x: terrainBounds.min.x,
+                y: -toolRadius,
+                z: zFloor
+            },
+            max: {
+                x: terrainBounds.max.x,
+                y: toolRadius,
+                z: ZMAX
+            }
+        };
 
-            // 1. Define strip bounds (narrow band for rasterization)
-            const stripBounds = {
-                min: {
-                    x: terrainBounds.min.x,
-                    y: -toolRadius,
-                    z: zFloor
-                },
-                max: {
-                    x: terrainBounds.max.x,
-                    y: toolRadius,
-                    z: ZMAX
-                }
-            };
+        if (useBatch) {
+            // BATCH MODE: Single rasterize-batch call with buffer reuse
+            debug.log(`[RasterPath Worker ${workerIdx}] Using batch rasterization for ${angles.length} angles`);
 
-            // 2. Rasterize strip using this worker (GPU will rotate triangles)
-            const stripRaster = await new Promise((resolve, reject) => {
+            const batchResults = await new Promise((resolve, reject) => {
                 const handler = (data) => resolve(data);
                 this._sendWorkerMessage(
                     workerState,
-                    'rasterize',
+                    'rasterize-batch',
                     {
-                        triangles: terrainTriangles,  // Pass unrotated triangles
+                        triangles: terrainTriangles,
                         stepSize: gridStep,
                         filterMode: 0,
                         isForTool: false,
                         boundsOverride: stripBounds,
-                        rotationAngleDeg: angle  // GPU will apply rotation
+                        rotationAngles: angles  // All angles at once
                     },
-                    'rasterize-complete',
+                    'rasterize-batch-complete',
                     handler
                 );
             });
 
-            // 4. Generate scanline from strip using this worker
-            const scanlineData = await new Promise((resolve, reject) => {
-                const handler = (data) => resolve(data);
-                this._sendWorkerMessage(
-                    workerState,
-                    'generate-radial-scanline',
-                    {
-                        stripPositions: stripRaster.positions,
-                        stripBounds: stripRaster.bounds,
-                        toolPositions,
-                        xStep,
-                        zFloor,
-                        gridStep
-                    },
-                    'radial-scanline-complete',
-                    handler
-                );
-            });
+            // Process each rasterized strip into a scanline
+            for (let i = 0; i < batchResults.results.length; i++) {
+                const stripRaster = batchResults.results[i];
 
-            scanlines.push(scanlineData.scanline);
+                // Generate scanline from strip
+                const scanlineData = await new Promise((resolve, reject) => {
+                    const handler = (data) => resolve(data);
+                    this._sendWorkerMessage(
+                        workerState,
+                        'generate-radial-scanline',
+                        {
+                            stripPositions: stripRaster.positions,
+                            stripBounds: stripRaster.bounds,
+                            toolPositions,
+                            xStep,
+                            zFloor,
+                            gridStep
+                        },
+                        'radial-scanline-complete',
+                        handler
+                    );
+                });
 
-            // Report progress for this completed rotation
-            if (progressCallback) {
-                progressCallback(1);  // Report 1 rotation completed
+                scanlines.push(scanlineData.scanline);
+
+                // Report progress every 10 scanlines or at end
+                if (progressCallback && (i % 10 === 0 || i === batchResults.results.length - 1)) {
+                    const completedSinceLastReport = (i % 10 === 0) ? 10 : (i % 10) + 1;
+                    progressCallback(completedSinceLastReport);
+                }
+            }
+
+        } else {
+            // LEGACY MODE: Individual rasterize calls (no buffer reuse)
+            debug.log(`[RasterPath Worker ${workerIdx}] Using legacy mode (no buffer reuse) for ${angles.length} angles`);
+
+            for (let i = 0; i < angles.length; i++) {
+                const angle = angles[i];
+
+                // 2. Rasterize strip using this worker (GPU will rotate triangles)
+                const stripRaster = await new Promise((resolve, reject) => {
+                    const handler = (data) => resolve(data);
+                    this._sendWorkerMessage(
+                        workerState,
+                        'rasterize',
+                        {
+                            triangles: terrainTriangles,  // Pass unrotated triangles
+                            stepSize: gridStep,
+                            filterMode: 0,
+                            isForTool: false,
+                            boundsOverride: stripBounds,
+                            rotationAngleDeg: angle  // GPU will apply rotation
+                        },
+                        'rasterize-complete',
+                        handler
+                    );
+                });
+
+                // 4. Generate scanline from strip using this worker
+                const scanlineData = await new Promise((resolve, reject) => {
+                    const handler = (data) => resolve(data);
+                    this._sendWorkerMessage(
+                        workerState,
+                        'generate-radial-scanline',
+                        {
+                            stripPositions: stripRaster.positions,
+                            stripBounds: stripRaster.bounds,
+                            toolPositions,
+                            xStep,
+                            zFloor,
+                            gridStep
+                        },
+                        'radial-scanline-complete',
+                        handler
+                    );
+                });
+
+                scanlines.push(scanlineData.scanline);
+
+                // Report progress for this completed rotation
+                if (progressCallback) {
+                    progressCallback(1);  // Report 1 rotation completed
+                }
             }
         }
 
