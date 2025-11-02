@@ -517,24 +517,48 @@ export class RasterPath {
             debug.log(`[RasterPath Worker ${workerIdx}] Using batch rasterization for ${angles.length} angles`);
 
             const batchResults = await new Promise((resolve, reject) => {
-                const handler = (data) => resolve(data);
-                this._sendWorkerMessage(
-                    workerState,
-                    'rasterize-batch',
-                    {
+                let lastProgressReported = 0;
+
+                // Custom handler to capture both progress and completion
+                const messageHandler = (e) => {
+                    const { type, data } = e.data;
+
+                    if (type === 'rasterize-batch-progress') {
+                        // Intermediate progress during rasterization
+                        if (progressCallback) {
+                            const anglesSinceLastReport = data.current - lastProgressReported;
+                            lastProgressReported = data.current;
+                            progressCallback(anglesSinceLastReport);
+                        }
+                    } else if (type === 'rasterize-batch-complete') {
+                        // Final completion
+                        workerState.worker.removeEventListener('message', messageHandler);
+                        resolve(data);
+                    } else if (type === 'error') {
+                        workerState.worker.removeEventListener('message', messageHandler);
+                        reject(new Error(data.message));
+                    }
+                };
+
+                workerState.worker.addEventListener('message', messageHandler);
+
+                // Send the batch rasterize request
+                // NOTE: Don't transfer buffer when using parallel workers - each needs a copy
+                workerState.worker.postMessage({
+                    type: 'rasterize-batch',
+                    data: {
                         triangles: terrainTriangles,
                         stepSize: gridStep,
                         filterMode: 0,
                         isForTool: false,
                         boundsOverride: stripBounds,
-                        rotationAngles: angles  // All angles at once
-                    },
-                    'rasterize-batch-complete',
-                    handler
-                );
+                        rotationAngles: angles
+                    }
+                });  // No transfer list - buffer will be copied to each worker
             });
 
             // Process each rasterized strip into a scanline
+            // (This is fast CPU work, progress already reported during rasterization above)
             for (let i = 0; i < batchResults.results.length; i++) {
                 const stripRaster = batchResults.results[i];
 
@@ -558,12 +582,6 @@ export class RasterPath {
                 });
 
                 scanlines.push(scanlineData.scanline);
-
-                // Report progress every 10 scanlines or at end
-                if (progressCallback && (i % 10 === 0 || i === batchResults.results.length - 1)) {
-                    const completedSinceLastReport = (i % 10 === 0) ? 10 : (i % 10) + 1;
-                    progressCallback(completedSinceLastReport);
-                }
             }
 
         } else {

@@ -2171,9 +2171,16 @@ self.onmessage = async function(e) {
                     const result = await rasterizeMeshWithBuffers(batchTriangles, rotationAngles[i], rasterBuffers, angleStartTime);
                     batchResults.push(result);
 
-                    // Report progress
+                    // Report progress to API
                     if ((i + 1) % 10 === 0 || i === rotationAngles.length - 1) {
                         debug.log(`[WebGPU Worker]   Rasterized ${i + 1}/${rotationAngles.length} angles (${result.conversionTime.toFixed(1)}ms)`);
+                        self.postMessage({
+                            type: 'rasterize-batch-progress',
+                            data: {
+                                current: i + 1,
+                                total: rotationAngles.length
+                            }
+                        });
                     }
                 }
 
