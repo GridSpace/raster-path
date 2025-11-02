@@ -254,8 +254,9 @@
             `;
 
             const blob = new Blob([workerCode], { type: 'application/javascript' });
+            const WORKERS = 4;
 
-            for (let i=0; i<1; i++) {
+            for (let i=0; i<WORKERS; i++) {
                 let worker = new Worker(URL.createObjectURL(blob));
                 worker.onmessage = function(e) {
                     const data = e.data;

@@ -558,7 +558,12 @@ export class RasterPath {
             });
 
             // Process each rasterized strip into a scanline
-            // (This is fast CPU work, progress already reported during rasterization above)
+            // Note: This is currently CPU work. Progress reporting happens during rasterization,
+            // but we could add visual feedback here if scanline generation becomes slow.
+            if (progressCallback && batchResults.results.length > 0) {
+                debug.log(`[RasterPath Worker ${workerIdx}] Starting scanline generation for ${batchResults.results.length} strips`);
+            }
+
             for (let i = 0; i < batchResults.results.length; i++) {
                 const stripRaster = batchResults.results[i];
 
@@ -582,6 +587,10 @@ export class RasterPath {
                 });
 
                 scanlines.push(scanlineData.scanline);
+            }
+
+            if (progressCallback && batchResults.results.length > 0) {
+                debug.log(`[RasterPath Worker ${workerIdx}] Scanline generation complete`);
             }
 
         } else {

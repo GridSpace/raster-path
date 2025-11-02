@@ -17,6 +17,7 @@ const EMPTY_CELL = -1e10;
 let { search } = self.location;
 let verbose = search.indexOf('debug') >= 0;
 let quiet = search.indexOf('quiet') >= 0;
+console.log({ verbose, quiet });
 
 const debug = {
     error: console.error,
@@ -657,6 +658,21 @@ async function rasterizeMeshWithBuffers(triangles, rotationAngleDeg, buffers, st
         // Terrain: Dense output
         result = new Float32Array(outputData);
         pointCount = buffers.totalGridPoints;
+
+        if (verbose) {
+            // Count valid points for logging (sentinel value = -1e10)
+            let zeroCount = 0;
+            let validCount = 0;
+            for (let i = 0; i < buffers.totalGridPoints; i++) {
+                if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
+                if (result[i] === 0) zeroCount++;
+            }
+
+            let percentHit = validCount / buffers.totalGridPoints;
+            if (zeroCount > 0 || percentHit < 0.5) {
+                debug.warn(`[WebGPU Worker] Batch terrain: ${buffers.totalGridPoints} grid cells, ${validCount} with geometry (${(percentHit * 100).toFixed(1)}% coverage) zeros=${zeroCount}`);
+            }
+        }
     } else {
         // Tool: Sparse output
         const validPoints = [];
@@ -781,12 +797,12 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     });
 
     // Initialize output buffer with sentinel value for terrain, zeros for tool
-    // if (filterMode === 0) {
-    //     // Terrain: initialize with EMPTY_CELL sentinel value
-    //     const initData = new Float32Array(totalGridPoints);
-    //     initData.fill(EMPTY_CELL);
-    //     device.queue.writeBuffer(outputBuffer, 0, initData);
-    // }
+    if (filterMode === 0) {
+        // Terrain: initialize with EMPTY_CELL sentinel value
+        const initData = new Float32Array(totalGridPoints);
+        initData.fill(EMPTY_CELL);
+        device.queue.writeBuffer(outputBuffer, 0, initData);
+    }
     // Tool mode: zeros are fine (will check valid mask)
 
     const validMaskBuffer = device.createBuffer({
@@ -912,8 +928,9 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
                 if (result[i] === 0) zeroCount++;
             }
 
-            if (zeroCount > 0) {
-                debug.warn(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(validCount/totalGridPoints*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
+            let percentHit = validCount/totalGridPoints;
+            if (zeroCount > 0 || percentHit < 0.5 ) {
+                debug.warn(`[WebGPU Worker] Dense terrain: ${totalGridPoints} grid cells, ${validCount} with geometry (${(percentHit*100).toFixed(1)}% coverage) zeros=${zeroCount}`);
             }
         }
     } else {
