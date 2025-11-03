@@ -17,7 +17,6 @@ const EMPTY_CELL = -1e10;
 let { search } = self.location;
 let verbose = search.indexOf('debug') >= 0;
 let quiet = search.indexOf('quiet') >= 0;
-console.log({ verbose, quiet });
 
 const debug = {
     error: console.error,
@@ -163,10 +162,12 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
         const v1x = triangles[base + 3], v1y = triangles[base + 4];
         const v2x = triangles[base + 6], v2y = triangles[base + 7];
 
-        const minX = Math.min(v0x, v1x, v2x);
-        const maxX = Math.max(v0x, v1x, v2x);
-        const minY = Math.min(v0y, v1y, v2y);
-        const maxY = Math.max(v0y, v1y, v2y);
+        // Add small epsilon to catch triangles near cell boundaries
+        const epsilon = cellSize * 0.01;  // 1% of cell size
+        const minX = Math.min(v0x, v1x, v2x) - epsilon;
+        const maxX = Math.max(v0x, v1x, v2x) + epsilon;
+        const minY = Math.min(v0y, v1y, v2y) - epsilon;
+        const maxY = Math.max(v0y, v1y, v2y) + epsilon;
 
         let minCellX = Math.floor((minX - bounds.min.x) / cellSize);
         let maxCellX = Math.floor((maxX - bounds.min.x) / cellSize);
@@ -217,231 +218,6 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
 }
 
 // Create reusable GPU buffers for multiple rasterization passes (e.g., radial rotations)
-function createReusableRasterizeBuffers(triangles, stepSize, filterMode, bounds) {
-    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / stepSize) + 1;
-    const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
-    const totalGridPoints = gridWidth * gridHeight;
-    const floatsPerPoint = filterMode === 0 ? 1 : 3;
-    const outputSize = totalGridPoints * floatsPerPoint * 4;
-
-    // Triangle buffer (static size, will be rewritten)
-    const triangleBuffer = device.createBuffer({
-        size: triangles.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    // Output buffer (reused across rotations)
-    const outputBuffer = device.createBuffer({
-        size: outputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    });
-
-    // Valid mask buffer (reused)
-    const validMaskBuffer = device.createBuffer({
-        size: totalGridPoints * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-
-    // Spatial grid buffers (size for worst case - all triangles in all cells)
-    const triangleCount = triangles.length / 9;
-    const spatialGridSize = Math.max(16, Math.ceil(Math.sqrt(triangleCount / 10))); // Heuristic
-    const maxSpatialCells = spatialGridSize * spatialGridSize;
-    const maxSpatialRefs = triangleCount * 4; // Assume each triangle in ~4 cells max
-
-    const spatialCellOffsetsBuffer = device.createBuffer({
-        size: (maxSpatialCells + 1) * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    const spatialTriangleIndicesBuffer = device.createBuffer({
-        size: maxSpatialRefs * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    // Uniform buffer (reused, will be updated)
-    const uniformBuffer = device.createBuffer({
-        size: 64,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    // Staging buffers for readback
-    const stagingOutputBuffer = device.createBuffer({
-        size: outputSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-
-    const stagingValidMaskBuffer = device.createBuffer({
-        size: totalGridPoints * 4,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-
-    return {
-        triangleBuffer,
-        outputBuffer,
-        validMaskBuffer,
-        spatialCellOffsetsBuffer,
-        spatialTriangleIndicesBuffer,
-        uniformBuffer,
-        stagingOutputBuffer,
-        stagingValidMaskBuffer,
-        gridWidth,
-        gridHeight,
-        totalGridPoints,
-        floatsPerPoint,
-        outputSize,
-        filterMode,
-        bounds,
-        stepSize
-    };
-}
-
-// Destroy reusable rasterize buffers
-function destroyReusableRasterizeBuffers(buffers) {
-    buffers.triangleBuffer.destroy();
-    buffers.outputBuffer.destroy();
-    buffers.validMaskBuffer.destroy();
-    buffers.spatialCellOffsetsBuffer.destroy();
-    buffers.spatialTriangleIndicesBuffer.destroy();
-    buffers.uniformBuffer.destroy();
-    buffers.stagingOutputBuffer.destroy();
-    buffers.stagingValidMaskBuffer.destroy();
-}
-
-// Rasterize using pre-created reusable buffers
-async function rasterizeMeshWithBuffers(triangles, rotationAngleDeg, buffers, startTime) {
-    // Rotate triangles on CPU if needed
-    let processedTriangles = triangles;
-    if (rotationAngleDeg !== 0) {
-        const rad = rotationAngleDeg * Math.PI / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        processedTriangles = new Float32Array(triangles.length);
-        for (let i = 0; i < triangles.length; i += 3) {
-            const x = triangles[i];
-            const y = triangles[i + 1];
-            const z = triangles[i + 2];
-            processedTriangles[i] = x;
-            processedTriangles[i + 1] = y * cos - z * sin;
-            processedTriangles[i + 2] = y * sin + z * cos;
-        }
-    }
-
-    // Write triangle data
-    device.queue.writeBuffer(buffers.triangleBuffer, 0, processedTriangles);
-
-    // Build spatial grid
-    const spatialGrid = buildSpatialGrid(processedTriangles, buffers.bounds);
-    device.queue.writeBuffer(buffers.spatialCellOffsetsBuffer, 0, spatialGrid.cellOffsets);
-    device.queue.writeBuffer(buffers.spatialTriangleIndicesBuffer, 0, spatialGrid.triangleIndices);
-
-    // Update uniforms
-    const uniformData = new Float32Array([
-        buffers.bounds.min.x, buffers.bounds.min.y, buffers.bounds.min.z,
-        buffers.bounds.max.x, buffers.bounds.max.y, buffers.bounds.max.z,
-        buffers.stepSize,
-        0, 0, 0, 0, 0, 0, 0
-    ]);
-    const uniformDataU32 = new Uint32Array(uniformData.buffer);
-    uniformDataU32[7] = buffers.gridWidth;
-    uniformDataU32[8] = buffers.gridHeight;
-    uniformDataU32[9] = processedTriangles.length / 9;
-    uniformDataU32[10] = buffers.filterMode;
-    uniformDataU32[11] = spatialGrid.gridWidth;
-    uniformDataU32[12] = spatialGrid.gridHeight;
-    const uniformDataF32 = new Float32Array(uniformData.buffer);
-    uniformDataF32[13] = spatialGrid.cellSize;
-    device.queue.writeBuffer(buffers.uniformBuffer, 0, uniformData);
-
-    // Create bind group
-    const bindGroup = device.createBindGroup({
-        layout: cachedRasterizePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.triangleBuffer } },
-            { binding: 1, resource: { buffer: buffers.outputBuffer } },
-            { binding: 2, resource: { buffer: buffers.validMaskBuffer } },
-            { binding: 3, resource: { buffer: buffers.uniformBuffer } },
-            { binding: 4, resource: { buffer: buffers.spatialCellOffsetsBuffer } },
-            { binding: 5, resource: { buffer: buffers.spatialTriangleIndicesBuffer } },
-        ],
-    });
-
-    // Dispatch compute shader
-    const commandEncoder = device.createCommandEncoder();
-    const passEncoder = commandEncoder.beginComputePass();
-    passEncoder.setPipeline(cachedRasterizePipeline);
-    passEncoder.setBindGroup(0, bindGroup);
-
-    const workgroupsX = Math.ceil(buffers.gridWidth / 16);
-    const workgroupsY = Math.ceil(buffers.gridHeight / 16);
-    passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
-    passEncoder.end();
-
-    // Copy to staging
-    commandEncoder.copyBufferToBuffer(buffers.outputBuffer, 0, buffers.stagingOutputBuffer, 0, buffers.outputSize);
-    commandEncoder.copyBufferToBuffer(buffers.validMaskBuffer, 0, buffers.stagingValidMaskBuffer, 0, buffers.totalGridPoints * 4);
-
-    device.queue.submit([commandEncoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-
-    // Read back results
-    await buffers.stagingOutputBuffer.mapAsync(GPUMapMode.READ);
-    await buffers.stagingValidMaskBuffer.mapAsync(GPUMapMode.READ);
-
-    const outputData = new Float32Array(buffers.stagingOutputBuffer.getMappedRange());
-    const validMaskData = new Uint32Array(buffers.stagingValidMaskBuffer.getMappedRange());
-
-    let result, pointCount;
-
-    if (buffers.filterMode === 0) {
-        // Terrain: Dense output
-        result = new Float32Array(outputData);
-        pointCount = buffers.totalGridPoints;
-
-        if (verbose) {
-            // Count valid points for logging (sentinel value = -1e10)
-            let zeroCount = 0;
-            let validCount = 0;
-            for (let i = 0; i < buffers.totalGridPoints; i++) {
-                if (result[i] > EMPTY_CELL + 1) validCount++;  // Any value significantly above sentinel
-                if (result[i] === 0) zeroCount++;
-            }
-
-            let percentHit = validCount / buffers.totalGridPoints;
-            if (zeroCount > 0 || percentHit < 0.5) {
-                debug.warn(`[WebGPU Worker] Batch terrain: ${buffers.totalGridPoints} grid cells, ${validCount} with geometry (${(percentHit * 100).toFixed(1)}% coverage) zeros=${zeroCount}`);
-            }
-        }
-    } else {
-        // Tool: Sparse output
-        const validPoints = [];
-        for (let i = 0; i < buffers.totalGridPoints; i++) {
-            if (validMaskData[i] === 1) {
-                validPoints.push(
-                    outputData[i * 3],
-                    outputData[i * 3 + 1],
-                    outputData[i * 3 + 2]
-                );
-            }
-        }
-        result = new Float32Array(validPoints);
-        pointCount = validPoints.length / 3;
-    }
-
-    buffers.stagingOutputBuffer.unmap();
-    buffers.stagingValidMaskBuffer.unmap();
-
-    const endTime = performance.now();
-
-    return {
-        positions: result,
-        pointCount: pointCount,
-        bounds: buffers.bounds,
-        conversionTime: endTime - startTime,
-        gridWidth: buffers.gridWidth,
-        gridHeight: buffers.gridHeight,
-        isDense: buffers.filterMode === 0
-    };
-}
 
 // Rasterize mesh to point cloud
 // Internal function - rasterize without tiling (do not modify this function!)
@@ -494,39 +270,14 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
     }
 
-    // Apply rotation on CPU if requested (moved from GPU for consistency)
-    const rotationAngleDeg = options.rotationAngleDeg ?? 0;
-    const hasRotation = rotationAngleDeg !== 0;
-
-    let processedTriangles = triangles;
-
-    if (hasRotation) {
-        // Rotate around X-axis on CPU
-        const rad = rotationAngleDeg * Math.PI / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-
-        processedTriangles = new Float32Array(triangles.length);
-        for (let i = 0; i < triangles.length; i += 3) {
-            const x = triangles[i];
-            const y = triangles[i + 1];
-            const z = triangles[i + 2];
-
-            // Rotate around X-axis: X stays same, Y and Z rotate
-            processedTriangles[i] = x;
-            processedTriangles[i + 1] = y * cos - z * sin;
-            processedTriangles[i + 2] = y * sin + z * cos;
-        }
-    }
-
-    const spatialGrid = buildSpatialGrid(processedTriangles, bounds);
+    const spatialGrid = buildSpatialGrid(triangles, bounds);
 
     // Create buffers
     const triangleBuffer = device.createBuffer({
-        size: processedTriangles.byteLength,
+        size: triangles.byteLength,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(triangleBuffer, 0, processedTriangles);
+    device.queue.writeBuffer(triangleBuffer, 0, triangles);
 
     // Create and INITIALIZE output buffer (GPU buffers contain garbage by default!)
     const outputBuffer = device.createBuffer({
@@ -570,7 +321,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     const uniformDataU32 = new Uint32Array(uniformData.buffer);
     uniformDataU32[7] = gridWidth;
     uniformDataU32[8] = gridHeight;
-    uniformDataU32[9] = processedTriangles.length / 9;
+    uniformDataU32[9] = triangles.length / 9;
     uniformDataU32[10] = filterMode;
     uniformDataU32[11] = spatialGrid.gridWidth;
     uniformDataU32[12] = spatialGrid.gridHeight;
@@ -1102,9 +853,6 @@ function createSparseToolFromPoints(points) {
         yOffsets.push(yOffset);
         zValues.push(zValue);
     }
-
-    // console.log(JSON.stringify({ width, height, centerX, centerY }));
-    // console.log(zValues);
 
     return {
         count: xOffsets.length,
@@ -1859,12 +1607,13 @@ function generateRadialScanline(data) {
 }
 
 // Radial rasterization - two-pass tiled with bit-attention
-const TRIANGLES_PER_TILE = 25000; // Target triangles per X-tile
+// Workload budget: triangles × scanlines should stay under this to avoid timeouts
+const MAX_WORKLOAD_PER_TILE = 10_000_000; // triangles × gridHeight budget per tile
 
 let cachedRadialCullPipeline = null;
 let cachedRadialRasterizePipeline = null;
 
-async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor = 0, boundsOverride = null) {
+async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor = 0, boundsOverride = null, params = {}) {
     const startTime = performance.now();
 
     if (!isInitialized) {
@@ -1903,11 +1652,28 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
     const xRange = bounds.max.x - bounds.min.x;
     const rotationStepRadians = rotationStepDegrees * (Math.PI / 180);
 
-    // Calculate X-tiles
-    const numTiles = Math.ceil(numTriangles / TRIANGLES_PER_TILE);
-    const tileWidth = xRange / numTiles;
+    // Calculate grid height (number of angular scanlines)
+    const gridHeight = Math.ceil(360 / rotationStepDegrees) + 1;
 
-    debug.log(`[WebGPU Worker] Radial: ${numTriangles} triangles, ${numTiles} X-tiles (width: ${tileWidth.toFixed(2)}mm)`);
+    // Calculate number of tiles based on user config or auto-calculation
+    let numTiles, trianglesPerTileTarget;
+
+    if (params.trianglesPerTile) {
+        // User specified explicit triangles per tile
+        trianglesPerTileTarget = params.trianglesPerTile;
+        numTiles = Math.max(1, Math.ceil(numTriangles / trianglesPerTileTarget));
+        debug.log(`[WebGPU Worker] Radial: ${numTriangles} triangles, ${gridHeight} scanlines, ${numTiles} X-tiles (${trianglesPerTileTarget} target tri/tile)`);
+    } else {
+        // Auto-calculate based on workload budget
+        // Total work = numTriangles × gridHeight × culling_efficiency
+        // More tiles = smaller X-slices = better culling = less work per tile
+        const totalWorkload = numTriangles * gridHeight * 0.5; // 0.5 = expected culling efficiency
+        numTiles = Math.max(1, Math.ceil(totalWorkload / MAX_WORKLOAD_PER_TILE));
+        trianglesPerTileTarget = Math.ceil(numTriangles / numTiles);
+        debug.log(`[WebGPU Worker] Radial: ${numTriangles} triangles, ${gridHeight} scanlines, ${numTiles} X-tiles (${trianglesPerTileTarget} avg tri/tile, auto-calculated)`);
+    }
+
+    const tileWidth = xRange / numTiles;
 
     // Create pipelines on first use
     if (!cachedRadialCullPipeline) {
@@ -1993,6 +1759,50 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         const cullTime = performance.now() - tileStartTime;
         // debug.log(`[WebGPU Worker]   Culling: ${cullTime.toFixed(1)}ms`);
 
+        // Pass 1.5: Read back attention bits and compact to triangle index list
+        const compactStartTime = performance.now();
+
+        // Create staging buffer to read attention bits
+        const attentionStagingBuffer = device.createBuffer({
+            size: numWords * 4,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        const copyEncoder = device.createCommandEncoder();
+        copyEncoder.copyBufferToBuffer(attentionBuffer, 0, attentionStagingBuffer, 0, numWords * 4);
+        device.queue.submit([copyEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+
+        await attentionStagingBuffer.mapAsync(GPUMapMode.READ);
+        const attentionBits = new Uint32Array(attentionStagingBuffer.getMappedRange());
+
+        // CPU compaction: build list of marked triangle indices
+        const compactIndices = [];
+        for (let triIdx = 0; triIdx < numTriangles; triIdx++) {
+            const wordIdx = Math.floor(triIdx / 32);
+            const bitIdx = triIdx % 32;
+            const isMarked = (attentionBits[wordIdx] & (1 << bitIdx)) !== 0;
+            if (isMarked) {
+                compactIndices.push(triIdx);
+            }
+        }
+
+        attentionStagingBuffer.unmap();
+        attentionStagingBuffer.destroy();
+
+        const compactTime = performance.now() - compactStartTime;
+        const cullingEfficiency = ((numTriangles - compactIndices.length) / numTriangles * 100).toFixed(1);
+        debug.log(`${prefix} Compacted ${numTriangles} → ${compactIndices.length} triangles (${cullingEfficiency}% culled) in ${compactTime.toFixed(1)}ms`);
+
+        // Create compact triangle index buffer
+        const compactIndexBuffer = device.createBuffer({
+            size: Math.max(4, compactIndices.length * 4), // At least 4 bytes
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        if (compactIndices.length > 0) {
+            device.queue.writeBuffer(compactIndexBuffer, 0, new Uint32Array(compactIndices));
+        }
+
         // Pass 2: Rasterize this X-tile
         const rasterStartTime = performance.now();
 
@@ -2000,7 +1810,7 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         const gridHeight = Math.ceil(360 / rotationStepDegrees) + 1; // Number of angular samples
         const totalCells = gridWidth * gridHeight;
 
-        // debug.log(`[WebGPU Worker]   Grid: ${gridWidth}×${gridHeight} = ${totalCells} cells`);
+        debug.log(`${prefix} Grid: ${gridWidth}×${gridHeight} = ${totalCells} cells (rotationStep=${rotationStepDegrees}°)`);
 
         const outputBuffer = device.createBuffer({
             size: totalCells * 4,
@@ -2012,6 +1822,8 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         initData.fill(EMPTY_CELL);
         device.queue.writeBuffer(outputBuffer, 0, initData);
 
+        const rotationOffsetRadians = (params.radialRotationOffset ?? 0) * (Math.PI / 180);
+
         const rasterUniformData = new Float32Array(16);
         rasterUniformData[0] = tile_min_x;
         rasterUniformData[1] = tile_max_x;
@@ -2019,11 +1831,13 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         rasterUniformData[3] = rotationStepRadians;
         rasterUniformData[4] = stepSize;
         rasterUniformData[5] = zFloor;
+        rasterUniformData[6] = rotationOffsetRadians;
+        rasterUniformData[7] = 0; // padding
         const rasterUniformU32 = new Uint32Array(rasterUniformData.buffer);
-        rasterUniformU32[6] = gridWidth;
-        rasterUniformU32[7] = gridHeight;
-        rasterUniformU32[8] = numTriangles;
-        rasterUniformU32[9] = numWords;
+        rasterUniformU32[8] = gridWidth;
+        rasterUniformU32[9] = gridHeight;
+        rasterUniformU32[10] = compactIndices.length; // Use compact count instead of numTriangles
+        rasterUniformU32[11] = 0; // No longer using attention words
 
         const rasterUniformBuffer = device.createBuffer({
             size: 64,
@@ -2035,7 +1849,7 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
             layout: cachedRadialRasterizePipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: triangleBuffer } },
-                { binding: 1, resource: { buffer: attentionBuffer } },
+                { binding: 1, resource: { buffer: compactIndexBuffer } }, // Use compact indices instead of attention bits
                 { binding: 2, resource: { buffer: outputBuffer } },
                 { binding: 3, resource: { buffer: rasterUniformBuffer } },
             ],
@@ -2070,6 +1884,7 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         // Cleanup tile buffers
         attentionBuffer.destroy();
         cullUniformBuffer.destroy();
+        compactIndexBuffer.destroy();
         outputBuffer.destroy();
         rasterUniformBuffer.destroy();
         stagingBuffer.destroy();
@@ -2088,13 +1903,19 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         }
     }
 
-    // Process all tiles in parallel with progress tracking
-    debug.log(`[WebGPU Worker] Processing ${numTiles} tiles in parallel...`);
-    let completedTiles = 0;
-    const tilePromises = [];
+    // Process tiles with rolling window to maintain constant concurrency
+    // This keeps GPU busy while preventing browser from allocating too many buffers at once
+    const maxConcurrentTiles = params.maxConcurrentTiles ?? 50;
+    debug.log(`[WebGPU Worker] Processing ${numTiles} tiles (max ${maxConcurrentTiles} concurrent)...`);
 
-    for (let tileIdx = 0; tileIdx < numTiles; tileIdx++) {
-        const tilePromise = processTile(tileIdx).then(result => {
+    let completedTiles = 0;
+    let nextTileIdx = 0;
+    const activeTiles = new Map(); // promise -> tileIdx
+    const tileResults = new Array(numTiles);
+
+    // Helper to start a tile and track it
+    const startTile = (tileIdx) => {
+        const promise = processTile(tileIdx).then(result => {
             completedTiles++;
             const percent = Math.round((completedTiles / numTiles) * 100);
 
@@ -2108,16 +1929,29 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
                 }
             });
 
+            tileResults[tileIdx] = result;
+            activeTiles.delete(promise);
             return result;
         });
-        tilePromises.push(tilePromise);
+        activeTiles.set(promise, tileIdx);
+        return promise;
+    };
+
+    // Start initial window of tiles
+    while (nextTileIdx < numTiles && activeTiles.size < maxConcurrentTiles) {
+        startTile(nextTileIdx++);
     }
 
-    // Wait for all tiles to complete
-    const tileResultsUnsorted = await Promise.all(tilePromises);
+    // As tiles complete, start new ones to maintain window size
+    while (activeTiles.size > 0) {
+        // Wait for at least one tile to complete
+        await Promise.race(activeTiles.keys());
 
-    // Sort by tile index to ensure correct X ordering for stitching
-    const tileResults = tileResultsUnsorted.sort((a, b) => a.tileIdx - b.tileIdx);
+        // Start as many new tiles as needed to fill window
+        while (nextTileIdx < numTiles && activeTiles.size < maxConcurrentTiles) {
+            startTile(nextTileIdx++);
+        }
+    }
 
     triangleBuffer.destroy();
 
@@ -2201,72 +2035,14 @@ self.onmessage = async function(e) {
                 break;
 
             case 'rasterize':
-                const { triangles, stepSize, filterMode, isForTool, boundsOverride, rotationAngleDeg } = data;
-                const rasterOptions = boundsOverride ? { ...boundsOverride, rotationAngleDeg } : { rotationAngleDeg };
+                const { triangles, stepSize, filterMode, isForTool, boundsOverride } = data;
+                const rasterOptions = boundsOverride || {};
                 const rasterResult = await rasterizeMesh(triangles, stepSize, filterMode, rasterOptions);
                 self.postMessage({
                     type: 'rasterize-complete',
                     data: rasterResult,
                     isForTool: isForTool || false // Pass through the flag
                 }, [rasterResult.positions.buffer]);
-                break;
-
-            case 'rasterize-batch':
-                // Batch rasterization with buffer reuse (for radial toolpath)
-                const { triangles: batchTriangles, stepSize: batchStep, filterMode: batchFilter,
-                        rotationAngles, boundsOverride: batchBounds, isForTool: batchIsForTool } = data;
-
-                if (!isInitialized) {
-                    const success = await initWebGPU();
-                    if (!success) {
-                        throw new Error('WebGPU not available');
-                    }
-                }
-
-                const bounds = batchBounds || calculateBounds(batchTriangles);
-                const batchStartTime = performance.now();
-
-                debug.log(`[WebGPU Worker] Batch rasterization: ${rotationAngles.length} angles with buffer reuse`);
-
-                // Create reusable buffers once
-                const rasterBuffers = createReusableRasterizeBuffers(batchTriangles, batchStep, batchFilter, bounds);
-
-                // Rasterize at each angle
-                const batchResults = [];
-                for (let i = 0; i < rotationAngles.length; i++) {
-                    const angleStartTime = performance.now();
-                    const result = await rasterizeMeshWithBuffers(batchTriangles, rotationAngles[i], rasterBuffers, angleStartTime);
-                    batchResults.push(result);
-
-                    // Report progress to API
-                    if ((i + 1) % 10 === 0 || i === rotationAngles.length - 1) {
-                        debug.log(`[WebGPU Worker]   Rasterized ${i + 1}/${rotationAngles.length} angles (${result.conversionTime.toFixed(1)}ms)`);
-                        self.postMessage({
-                            type: 'rasterize-batch-progress',
-                            data: {
-                                current: i + 1,
-                                total: rotationAngles.length
-                            }
-                        });
-                    }
-                }
-
-                // Cleanup buffers once
-                destroyReusableRasterizeBuffers(rasterBuffers);
-
-                const batchTotalTime = performance.now() - batchStartTime;
-                const avgPerAngle = batchTotalTime / rotationAngles.length;
-                debug.log(`[WebGPU Worker] ✅ Batch complete: ${rotationAngles.length} angles in ${batchTotalTime.toFixed(1)}ms (avg ${avgPerAngle.toFixed(1)}ms/angle)`);
-
-                self.postMessage({
-                    type: 'rasterize-batch-complete',
-                    data: {
-                        results: batchResults,
-                        totalTime: batchTotalTime,
-                        anglesProcessed: rotationAngles.length
-                    },
-                    isForTool: batchIsForTool || false
-                });
                 break;
 
             case 'generate-toolpath':
@@ -2289,8 +2065,8 @@ self.onmessage = async function(e) {
                 break;
 
             case 'radial-rasterize':
-                const { triangles: radialTriangles, stepSize: radialStep, rotationStep: radialRotationStep, zFloor: radialZFloor = 0, boundsOverride: radialBounds } = data;
-                const radialResult = await radialRasterize(radialTriangles, radialStep, radialRotationStep, radialZFloor, radialBounds);
+                const { triangles: radialTriangles, stepSize: radialStep, rotationStep: radialRotationStep, zFloor: radialZFloor = 0, boundsOverride: radialBounds, maxConcurrentTiles, trianglesPerTile, radialRotationOffset } = data;
+                const radialResult = await radialRasterize(radialTriangles, radialStep, radialRotationStep, radialZFloor, radialBounds, { maxConcurrentTiles, trianglesPerTile, radialRotationOffset });
                 self.postMessage({
                     type: 'radial-rasterize-complete',
                     data: radialResult

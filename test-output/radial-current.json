@@ -11,15 +11,15 @@
     "toolTriangles": 960
   },
   "result": {
-    "terrainCells": 2356638,
+    "terrainCells": 271111,
     "terrainTiles": 1,
     "circumference": 313.61466978148,
     "maxRadius": 49.913324921855,
     "toolPoints": 1943,
-    "toolpathSize": 94828,
-    "numScanlines": 628,
+    "toolpathSize": 11023,
+    "numScanlines": 73,
     "pointsPerLine": 151,
-    "checksum": -2071393224,
+    "checksum": 576269517,
     "sampleValues": [
       "9.77",
       "11.18",
@@ -54,9 +54,9 @@
     ]
   },
   "timing": {
-    "terrain": 550.1000003814697,
-    "tool": 5.099999904632568,
-    "toolpath": 14.900000095367432,
-    "total": 570.1000003814697
+    "terrain": 237.90000009536743,
+    "tool": 4.899999618530273,
+    "toolpath": 6.099999904632568,
+    "total": 248.89999961853027
   }
 }

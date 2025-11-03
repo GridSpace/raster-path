@@ -28,10 +28,12 @@ struct Uniforms {
 
 // Fast 2D bounding box check for XY plane
 fn ray_hits_triangle_bbox_2d(ray_x: f32, ray_y: f32, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
-    let min_x = min(min(v0.x, v1.x), v2.x);
-    let max_x = max(max(v0.x, v1.x), v2.x);
-    let min_y = min(min(v0.y, v1.y), v2.y);
-    let max_y = max(max(v0.y, v1.y), v2.y);
+    // Add small epsilon to catch near-misses (mesh vertex gaps, FP rounding)
+    let epsilon = 0.001;  // 1 micron tolerance
+    let min_x = min(min(v0.x, v1.x), v2.x) - epsilon;
+    let max_x = max(max(v0.x, v1.x), v2.x) + epsilon;
+    let min_y = min(min(v0.y, v1.y), v2.y) - epsilon;
+    let max_y = max(max(v0.y, v1.y), v2.y) + epsilon;
 
     return ray_x >= min_x && ray_x <= max_x && ray_y >= min_y && ray_y <= max_y;
 }
@@ -44,7 +46,8 @@ fn ray_triangle_intersect(
     v1: vec3<f32>,
     v2: vec3<f32>
 ) -> vec2<f32> {  // Returns (hit: 0.0 or 1.0, z: intersection_z)
-    let EPSILON = 0.0000001;
+    // Larger epsilon needed because near-parallel triangles (small 'a') amplify errors via f=1/a
+    let EPSILON = 0.0001;
 
     // Early rejection using 2D bounding box (very cheap!)
     if (!ray_hits_triangle_bbox_2d(ray_origin.x, ray_origin.y, v0, v1, v2)) {
@@ -73,7 +76,7 @@ fn ray_triangle_intersect(
     // u = f * (s · h)
     let u = f * dot(s, h);
 
-    // Allow small tolerance for edges/vertices to ensure watertight coverage
+    // Allow tolerance for edges/vertices to ensure watertight coverage
     if (u < -EPSILON || u > 1.0 + EPSILON) {
         return vec2<f32>(0.0, 0.0);
     }
@@ -84,7 +87,7 @@ fn ray_triangle_intersect(
     // v = f * (ray_dir · q)
     let v = f * dot(ray_dir, q);
 
-    // Allow small tolerance for edges/vertices to ensure watertight coverage
+    // Allow tolerance for edges/vertices to ensure watertight coverage
     if (v < -EPSILON || u + v > 1.0 + EPSILON) {
         return vec2<f32>(0.0, 0.0);
     }

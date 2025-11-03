@@ -1,6 +1,7 @@
 // Planar toolpath generation
 // Sentinel value for empty terrain cells (must match rasterize shader)
 const EMPTY_CELL: f32 = -1e10;
+const MAX_F32: f32 = 3.402823466e+38;
 
 struct SparseToolPoint {
     x_offset: i32,
@@ -37,7 +38,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let tool_center_x = i32(point_idx * uniforms.x_step);
     let tool_center_y = i32(scanline * uniforms.y_step);
 
-    var min_delta = 3.402823466e+38;
+    var min_delta = MAX_F32;
 
     for (var i = 0u; i < uniforms.tool_count; i++) {
         let tool_point = sparse_tool[i];
@@ -61,7 +62,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     var output_z = uniforms.oob_z;
-    if (min_delta < 3.402823466e+38) {
+    if (min_delta < MAX_F32) {
         output_z = -min_delta;
     }
 

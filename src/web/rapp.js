@@ -260,7 +260,7 @@ async function initRasterPath() {
         mode: mode,
         resolution: resolution,
         rotationStep: mode === 'radial' ? angleStep : undefined,
-        maxGPUMemoryMB: 128,  // Reduce from default 256MB to avoid workgroup failures
+        // trianglesPerTile: 15000,
         debug: true  // Enable debug logging
     });
 
@@ -883,14 +883,14 @@ function updateButtonStates() {
 
 function updateModeUI() {
     // Show/hide wrapped toggle and angle step for radial mode
-    const wrappedContainer = document.getElementById('wrapped-container');
-    const angleStepContainer = document.getElementById('angle-step-container');
+    const wrappedContainer = document.getElementById('wrapped-container').classList;
+    const angleStepContainer = document.getElementById('angle-step-container').classList;
     if (mode === 'radial') {
-        wrappedContainer.style.display = 'block';
-        angleStepContainer.style.display = 'block';
+        wrappedContainer.remove('hide');
+        angleStepContainer.remove('hide');
     } else {
-        wrappedContainer.style.display = 'none';
-        angleStepContainer.style.display = 'none';
+        wrappedContainer.add('hide');
+        angleStepContainer.add('hide');
     }
 }
 

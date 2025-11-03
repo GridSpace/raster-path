@@ -13,6 +13,9 @@
  * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
  * @property {boolean} quiet - Suppress log output (default: false)
  * @property {boolean} debug - Enable debug logging (default: false)
+ * @property {number} maxConcurrentTiles - Max concurrent tiles for radial rasterization (default: 50)
+ * @property {number} trianglesPerTile - Target triangles per tile for radial rasterization (default: calculated)
+ * @property {number} radialRotationOffset - Radial mode: rotation offset in degrees (default: 0, use 90 to start at Z-axis)
  */
 
 const ZMAX = 10e6;
@@ -73,6 +76,9 @@ export class RasterPath {
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             autoTiling: config.autoTiling ?? true,
             minTileSize: config.minTileSize ?? 50,
+            maxConcurrentTiles: config.maxConcurrentTiles ?? 10,
+            trianglesPerTile: config.trianglesPerTile, // undefined = auto-calculate
+            radialRotationOffset: config.radialRotationOffset ?? 0, // degrees
         };
     }
 
@@ -206,7 +212,7 @@ export class RasterPath {
     // ============================================================================
 
     async #rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool }) {
-        return new Promise((resolve, reject) => {
+        const data = await new Promise((resolve, reject) => {
             const handler = (data) => resolve(data);
 
             this.#sendMessage(
@@ -222,6 +228,8 @@ export class RasterPath {
                 handler
             );
         });
+
+        return data;
     }
 
     async #rasterizePlanarTool({ triangles, zFloor, boundsOverride }) {
@@ -268,7 +276,7 @@ export class RasterPath {
     // ============================================================================
 
     async #rasterizeRadial({ triangles, zFloor, boundsOverride, onProgress }) {
-        return new Promise((resolve, reject) => {
+        const data = await new Promise((resolve, reject) => {
             // Set up progress handler if callback provided
             if (onProgress) {
                 const progressHandler = (data) => {
@@ -292,12 +300,17 @@ export class RasterPath {
                     stepSize: this.resolution,
                     rotationStep: this.rotationStep,
                     zFloor: zFloor ?? 0,
-                    boundsOverride
+                    boundsOverride,
+                    maxConcurrentTiles: this.config.maxConcurrentTiles,
+                    trianglesPerTile: this.config.trianglesPerTile,
+                    radialRotationOffset: this.config.radialRotationOffset
                 },
                 'radial-rasterize-complete',
                 handler
             );
         });
+
+        return data;
     }
 
     async #rasterizeRadialTool({ triangles, zFloor, boundsOverride }) {
@@ -513,7 +526,7 @@ export class RasterPath {
         const { type, success, data } = e.data;
 
         // Handle progress messages (don't delete handler)
-        if (type === 'rasterize-progress' || type === 'toolpath-progress' || type === 'rasterize-batch-progress') {
+        if (type === 'rasterize-progress' || type === 'toolpath-progress') {
             const handler = this.messageHandlers.get(type);
             if (handler) {
                 handler(data);

@@ -9,6 +9,8 @@ struct Uniforms {
     rotation_step_radians: f32,
     step_size: f32,
     z_floor: f32,
+    rotation_offset_radians: f32,
+    padding: f32,
     grid_width: u32,
     grid_height: u32,
     num_triangles: u32,
@@ -16,7 +18,7 @@ struct Uniforms {
 }
 
 @group(0) @binding(0) var<storage, read> triangles: array<f32>;
-@group(0) @binding(1) var<storage, read> attentionBits: array<u32>;
+@group(0) @binding(1) var<storage, read> compactTriangleIndices: array<u32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
 @group(0) @binding(3) var<uniform> uniforms: Uniforms;
 
@@ -42,14 +44,18 @@ fn rayTriangleIntersect(
     let s = rayOrigin - v0;
     let u = f * dot(s, h);
 
-    if (u < 0.0 || u > 1.0) {
+    // Allow tolerance for edges/vertices to ensure watertight coverage
+    // Larger epsilon needed because near-parallel triangles (small 'a') amplify errors via f=1/a
+    let EPSILON = 0.0001;
+    if (u < -EPSILON || u > 1.0 + EPSILON) {
         return -1.0;
     }
 
     let q = cross(s, edge1);
     let v = f * dot(rayDir, q);
 
-    if (v < 0.0 || u + v > 1.0) {
+    // Allow tolerance for edges/vertices to ensure watertight coverage
+    if (v < -EPSILON || u + v > 1.0 + EPSILON) {
         return -1.0;
     }
 
@@ -76,31 +82,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Calculate world X position
     let wx = uniforms.bounds_min_x + f32(gx) * uniforms.step_size;
 
-    // Calculate angle from Y grid position
-    let theta = f32(gy) * uniforms.rotation_step_radians;
+    // Calculate angle from Y grid position with optional rotation offset
+    let theta = f32(gy) * uniforms.rotation_step_radians + uniforms.rotation_offset_radians;
 
-    // Ray origin: start at X-axis (origin in YZ plane)
+    // Ray origin: start along X-axis (in YZ plane at origin)
     let cosTheta = cos(theta);
     let sinTheta = sin(theta);
     let rayOrigin = vec3f(wx, 0.0, 0.0);
 
-    // Ray direction: point outward from X-axis (normalized)
-    let rayDir = vec3f(0.0, cosTheta, sinTheta);
+    // Ray direction: point outward radially in YZ plane
+    let rayDirOut = vec3f(0.0, cosTheta, sinTheta);
 
-    // Find FARTHEST intersection (only check marked triangles)
-    var farthestT = 0.0;
+    // Find FARTHEST intersection in outward direction (positive distances)
+    var bestRadius = -1e10;  // Start with very negative (worst case)
     var foundHit = false;
 
-    for (var triIdx = 0u; triIdx < uniforms.num_triangles; triIdx++) {
-        // Check attention bit
-        let wordIdx = triIdx / 32u;
-        let bitIdx = triIdx % 32u;
-        let word = attentionBits[wordIdx];
-        let isMarked = (word & (1u << bitIdx)) != 0u;
-
-        if (!isMarked) {
-            continue; // Skip unmarked triangles
-        }
+    // Iterate over compact list of marked triangles (no bit checking needed!)
+    for (var compactIdx = 0u; compactIdx < uniforms.num_triangles; compactIdx++) {
+        // Get actual triangle index from compact list
+        let triIdx = compactTriangleIndices[compactIdx];
 
         // Test triangle
         let base = triIdx * 9u;
@@ -108,22 +108,55 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let v1 = vec3f(triangles[base + 3u], triangles[base + 4u], triangles[base + 5u]);
         let v2 = vec3f(triangles[base + 6u], triangles[base + 7u], triangles[base + 8u]);
 
-        let t_hit = rayTriangleIntersect(rayOrigin, rayDir, v0, v1, v2);
+        let t_hit = rayTriangleIntersect(rayOrigin, rayDirOut, v0, v1, v2);
 
-        if (t_hit > 0.0 && t_hit > farthestT) {
-            farthestT = t_hit;
-            foundHit = true;
+        if (t_hit > 0.0) {
+            // Positive distance - geometry is outward from axis
+            let hitY = rayOrigin.y + t_hit * rayDirOut.y;
+            let hitZ = rayOrigin.z + t_hit * rayDirOut.z;
+            let radius = sqrt(hitY * hitY + hitZ * hitZ);
+
+            if (radius > bestRadius) {
+                bestRadius = radius;
+                foundHit = true;
+            }
+        }
+    }
+
+    // Also check inward direction (for lathe ops through center)
+    // These will have negative conceptual distances (inside the axis)
+    let rayDirIn = vec3f(0.0, -cosTheta, -sinTheta);
+
+    for (var compactIdx = 0u; compactIdx < uniforms.num_triangles; compactIdx++) {
+        // Get actual triangle index from compact list
+        let triIdx = compactTriangleIndices[compactIdx];
+
+        // Test triangle
+        let base = triIdx * 9u;
+        let v0 = vec3f(triangles[base + 0u], triangles[base + 1u], triangles[base + 2u]);
+        let v1 = vec3f(triangles[base + 3u], triangles[base + 4u], triangles[base + 5u]);
+        let v2 = vec3f(triangles[base + 6u], triangles[base + 7u], triangles[base + 8u]);
+
+        let t_hit = rayTriangleIntersect(rayOrigin, rayDirIn, v0, v1, v2);
+
+        if (t_hit > 0.0) {
+            // Ray found geometry in inward direction
+            // Calculate position (will be on opposite side of axis)
+            let hitY = rayOrigin.y + t_hit * rayDirIn.y;
+            let hitZ = rayOrigin.z + t_hit * rayDirIn.z;
+            let radius = -sqrt(hitY * hitY + hitZ * hitZ);  // Negative for inward
+
+            if (radius > bestRadius) {
+                bestRadius = radius;
+                foundHit = true;
+            }
         }
     }
 
     // Calculate output
     if (foundHit) {
-        let hitY = rayOrigin.y + farthestT * rayDir.y;
-        let hitZ = rayOrigin.z + farthestT * rayDir.z;
-        let radius = sqrt(hitY * hitY + hitZ * hitZ);
-
         // Apply floor
-        output[idx] = max(radius, uniforms.z_floor);
+        output[idx] = max(bestRadius, uniforms.z_floor);
     } else {
         output[idx] = EMPTY_CELL;
     }
