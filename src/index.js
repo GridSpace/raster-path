@@ -4,15 +4,19 @@
 /**
  * Configuration options for RasterPath
  * @typedef {Object} RasterPathConfig
+ * @property {'planar'|'radial'} mode - Rasterization mode (default: 'planar')
+ * @property {number} resolution - Grid step size in mm (required)
+ * @property {number} rotationStep - Radial mode only: degrees between rays (e.g., 1.0 = 360 rays)
  * @property {number} maxGPUMemoryMB - Maximum GPU memory per tile (default: 256MB)
  * @property {number} gpuMemorySafetyMargin - Safety margin as percentage (default: 0.8 = 80%)
- * @property {number} tileOverlapMM - Overlap between tiles in mm for toolpath continuity (default: 10mm)
  * @property {boolean} autoTiling - Automatically tile large datasets (default: true)
  * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
+ * @property {boolean} quiet - Suppress log output (default: false)
+ * @property {boolean} debug - Enable debug logging (default: false)
  */
 
 const ZMAX = 10e6;
-const WMAX = 4;
+const EMPTY_CELL = -1e10;
 
 const debug = {
     error: console.error,
@@ -22,22 +26,37 @@ const debug = {
 
 /**
  * Main class for rasterizing geometry and generating toolpaths using WebGPU
- * Manages WebGPU worker lifecycle and provides async API for conversions
+ * Supports both planar and radial (cylindrical) rasterization modes
  */
 export class RasterPath {
     constructor(config = {}) {
+        // Validate required parameters
+        if (!config.resolution) {
+            throw new Error('RasterPath requires resolution parameter');
+        }
+
+        // Validate mode
+        const mode = config.mode || 'planar';
+        if (mode !== 'planar' && mode !== 'radial') {
+            throw new Error(`Invalid mode: ${mode}. Must be 'planar' or 'radial'`);
+        }
+
+        // Validate rotationStep for radial mode
+        if (mode === 'radial' && !config.rotationStep) {
+            throw new Error('Radial mode requires rotationStep parameter (degrees between rays)');
+        }
+
+        this.mode = mode;
+        this.resolution = config.resolution;
+        this.rotationStep = config.rotationStep;
+
         this.worker = null;
-        this.workerPool = []; // Pool of workers for radial processing
         this.isInitialized = false;
         this.messageHandlers = new Map();
         this.messageId = 0;
         this.deviceCapabilities = null;
 
-        const cores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency
-            ? navigator.hardwareConcurrency
-            : 4;
-        const maxWorkers = Math.min(WMAX, cores >= 6 ? cores - 2 : cores);
-
+        // Configure debug output
         let urlOpt = [];
         if (config.quiet) {
             debug.log = function() {};
@@ -52,10 +71,8 @@ export class RasterPath {
             workerName: (config.workerName ?? "webgpu-worker.js") + (urlOpt.length ? "?"+urlOpt.join('&') : ""),
             maxGPUMemoryMB: config.maxGPUMemoryMB ?? 256,
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
-            tileOverlapMM: config.tileOverlapMM ?? 10,
             autoTiling: config.autoTiling ?? true,
             minTileSize: config.minTileSize ?? 50,
-            maxWorkers: config.maxWorkers ?? maxWorkers, // for radial mode only
         };
     }
 
@@ -72,8 +89,6 @@ export class RasterPath {
         return new Promise((resolve, reject) => {
             try {
                 // Create worker from the webgpu-worker.js file
-                // Support both source (src/index.js -> src/web/webgpu-worker.js)
-                // and build (build/raster-path.js -> build/webgpu-worker.js)
                 const workerName = this.config.workerName;
                 const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
                 const workerPath = workerName
@@ -84,7 +99,7 @@ export class RasterPath {
                 this.worker = new Worker(workerPath, { type: 'module' });
 
                 // Set up message handler
-                this.worker.onmessage = (e) => this._handleMessage(e);
+                this.worker.onmessage = (e) => this.#handleMessage(e);
                 this.worker.onerror = (error) => {
                     debug.error('[RasterPath] Worker error:', error);
                     reject(error);
@@ -101,7 +116,7 @@ export class RasterPath {
                     }
                 };
 
-                this._sendMessage('init', { config: this.config }, 'webgpu-ready', handler);
+                this.#sendMessage('init', { config: this.config }, 'webgpu-ready', handler);
             } catch (error) {
                 reject(error);
             }
@@ -109,138 +124,111 @@ export class RasterPath {
     }
 
     /**
-     * Initialize worker pool for parallel processing
-     * Creates multiple WebGPU workers for parallel radial toolpath generation
-     * @returns {Promise<boolean>} Success status
+     * Rasterize model mesh to terrain heightmap
+     * @param {object} params - Parameters
+     * @param {Float32Array} params.triangles - Unindexed triangle vertices
+     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
+     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
+     * @param {function} params.onProgress - Optional progress callback (percent, info) => {}
+     * @returns {Promise<object>} Terrain data (format depends on mode)
      */
-    async initWorkerPool() {
-        if (this.workerPool.length > 0) {
-            return true; // Already initialized
-        }
-
-        const numWorkers = this.config.maxWorkers;
-        debug.log(`[RasterPath] Initializing worker pool with ${numWorkers} workers...`);
-
-        const workerName = this.config.workerName;
-        const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
-        const workerPath = workerName
-            ? new URL(workerName, import.meta.url)
-        : isBuildVersion
-            ? new URL(`./webgpu-worker.js`, import.meta.url)
-            : new URL(`./web/webgpu-worker.js`, import.meta.url);
-
-        // Create and initialize all workers in parallel
-        const initPromises = [];
-        for (let i = 0; i < numWorkers; i++) {
-            const promise = new Promise((resolve, reject) => {
-                try {
-                    const worker = new Worker(workerPath, { type: 'module' });
-                    const workerState = {
-                        worker,
-                        messageHandlers: new Map(),
-                        messageId: 0
-                    };
-
-                    worker.onmessage = (e) => this._handleWorkerMessage(workerState, e);
-                    worker.onerror = (error) => {
-                        debug.error(`[RasterPath] Worker ${i} error:`, error);
-                        reject(error);
-                    };
-
-                    // Send init message
-                    const handler = (data) => {
-                        if (data.success) {
-                            debug.log(`[RasterPath] Worker ${i} initialized`);
-                            resolve(workerState);
-                        } else {
-                            reject(new Error(`Worker ${i} failed to initialize WebGPU`));
-                        }
-                    };
-
-                    this._sendWorkerMessage(workerState, 'init', { config: this.config }, 'webgpu-ready', handler);
-                } catch (error) {
-                    reject(error);
-                }
-            });
-            initPromises.push(promise);
-        }
-
-        try {
-            this.workerPool = await Promise.all(initPromises);
-            debug.log(`[RasterPath] Worker pool initialized with ${this.workerPool.length} workers`);
-            return true;
-        } catch (error) {
-            debug.error('[RasterPath] Failed to initialize worker pool:', error);
-            // Clean up any initialized workers
-            for (const workerState of this.workerPool) {
-                workerState.worker.terminate();
-            }
-            this.workerPool = [];
-            throw error;
-        }
-    }
-
-    /**
-     * Rasterize triangle mesh to height map
-     * @param {Float32Array} triangles - Unindexed triangle positions (9 floats per triangle: v0.xyz, v1.xyz, v2.xyz)
-     * @param {number} stepSize - Grid resolution (e.g., 0.05)
-     * @param {number} filterMode - 0 for max Z (terrain), 1 for min Z (tool)
-     * @param {object} boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
-     * @returns {Promise<{positions: Float32Array, pointCount: number, bounds: object}>}
-     */
-    async rasterizeMesh(triangles, stepSize, filterMode = 0, boundsOverride = null) {
+    async rasterizeModel({ triangles, zFloor, boundsOverride, onProgress }) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
 
-        return new Promise((resolve, reject) => {
-            const handler = (data) => {
-                resolve(data);
-            };
+        if (this.mode === 'planar') {
+            return this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: false, onProgress });
+        } else {
+            return this.#rasterizeRadial({ triangles, zFloor, boundsOverride, onProgress });
+        }
+    }
 
-            this._sendMessage(
+    /**
+     * Rasterize tool mesh
+     * @param {object} params - Parameters
+     * @param {Float32Array} params.triangles - Unindexed triangle vertices
+     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
+     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
+     * @returns {Promise<object>} Tool data (sparse format: [gridX, gridY, Z, ...])
+     */
+    async rasterizeTool({ triangles, zFloor, boundsOverride }) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+
+        if (this.mode === 'planar') {
+            return this.#rasterizePlanarTool({ triangles, zFloor, boundsOverride });
+        } else {
+            return this.#rasterizeRadialTool({ triangles, zFloor, boundsOverride });
+        }
+    }
+
+    /**
+     * Generate toolpaths from terrain and tool data
+     * @param {object} params - Parameters
+     * @param {object} params.terrainData - Output from rasterizeModel()
+     * @param {object} params.toolData - Output from rasterizeTool()
+     * @param {number} params.xStep - X-axis step size in grid points
+     * @param {number} params.yStep - Y-axis step size in grid points
+     * @param {number} params.zFloor - Z floor value for out-of-bounds
+     * @param {number} params.radiusOffset - Radial only: tool offset above terrain (mm), default 20
+     * @param {function} params.onProgress - Optional progress callback (percent, info) => {}
+     * @returns {Promise<object>} Toolpath data
+     */
+    async generateToolpaths({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset = 20, onProgress }) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+
+        if (this.mode === 'planar') {
+            return this.#generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress });
+        } else {
+            return this.#generateToolpathsRadial({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset, onProgress });
+        }
+    }
+
+    /**
+     * Terminate worker and cleanup resources
+     */
+    terminate() {
+        if (this.worker) {
+            this.worker.terminate();
+            this.worker = null;
+            this.isInitialized = false;
+            this.messageHandlers.clear();
+            this.deviceCapabilities = null;
+        }
+    }
+
+    // ============================================================================
+    // Internal Methods (Planar)
+    // ============================================================================
+
+    async #rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool }) {
+        return new Promise((resolve, reject) => {
+            const handler = (data) => resolve(data);
+
+            this.#sendMessage(
                 'rasterize',
-                { triangles, stepSize, filterMode, isForTool: false, boundsOverride },
+                {
+                    triangles,
+                    stepSize: this.resolution,
+                    filterMode: isForTool ? 1 : 0,  // 0 = max Z (terrain), 1 = min Z (tool)
+                    isForTool,
+                    boundsOverride
+                },
                 'rasterize-complete',
                 handler
             );
         });
     }
 
-    /**
-     * Convert STL buffer to point mesh
-     * @param {ArrayBuffer} stlBuffer - Binary STL data
-     * @param {number} stepSize - Grid resolution (e.g., 0.05)
-     * @param {number} filterMode - 0 for max Z (terrain), 1 for min Z (tool)
-     * @param {object} boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
-     * @returns {Promise<{positions: Float32Array, pointCount: number, bounds: object}>}
-     */
-    async rasterizeSTL(stlBuffer, stepSize, filterMode = 0, boundsOverride = null) {
-        // Parse STL to triangles
-        const triangles = this._parseSTL(stlBuffer);
-
-        // Rasterize the mesh
-        return this.rasterizeMesh(triangles, stepSize, filterMode, boundsOverride);
+    async #rasterizePlanarTool({ triangles, zFloor, boundsOverride }) {
+        return this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: true });
     }
 
-    /**
-     * Generate planar toolpath from terrain and tool meshes
-     * @param {Float32Array} terrainPositions - Terrain point cloud positions
-     * @param {Float32Array} toolPositions - Tool point cloud positions
-     * @param {number} xStep - X-axis step size
-     * @param {number} yStep - Y-axis step size
-     * @param {number} zFloor - Z floor value
-     * @param {number} gridStep - Grid resolution
-     * @param {object} options - Optional settings {onProgress: (percent, info) => {}}
-     * @returns {Promise<{pathData: Float32Array, numScanlines: number, pointsPerLine: number, generationTime: number}>}
-     */
-    async generatePlanarToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, options = {}) {
-        if (!this.isInitialized) {
-            throw new Error('RasterPath not initialized. Call init() first.');
-        }
-
-        const { onProgress, terrainBounds } = options;
-
+    async #generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress }) {
         return new Promise((resolve, reject) => {
             // Set up progress handler if callback provided
             if (onProgress) {
@@ -258,9 +246,116 @@ export class RasterPath {
                 resolve(data);
             };
 
-            this._sendMessage(
+            this.#sendMessage(
                 'generate-toolpath',
-                { terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds },
+                {
+                    terrainPositions: terrainData.positions,
+                    toolPositions: toolData.positions,
+                    xStep,
+                    yStep,
+                    zFloor: zFloor ?? 0,
+                    gridStep: this.resolution,
+                    terrainBounds: terrainData.bounds
+                },
+                'toolpath-complete',
+                handler
+            );
+        });
+    }
+
+    // ============================================================================
+    // Internal Methods (Radial)
+    // ============================================================================
+
+    async #rasterizeRadial({ triangles, zFloor, boundsOverride, onProgress }) {
+        return new Promise((resolve, reject) => {
+            // Set up progress handler if callback provided
+            if (onProgress) {
+                const progressHandler = (data) => {
+                    onProgress(data.percent, { current: data.current, total: data.total });
+                };
+                this.messageHandlers.set('rasterize-progress', progressHandler);
+            }
+
+            const handler = (data) => {
+                // Clean up progress handler
+                if (onProgress) {
+                    this.messageHandlers.delete('rasterize-progress');
+                }
+                resolve(data);
+            };
+
+            this.#sendMessage(
+                'radial-rasterize',
+                {
+                    triangles,
+                    stepSize: this.resolution,
+                    rotationStep: this.rotationStep,
+                    zFloor: zFloor ?? 0,
+                    boundsOverride
+                },
+                'radial-rasterize-complete',
+                handler
+            );
+        });
+    }
+
+    async #rasterizeRadialTool({ triangles, zFloor, boundsOverride }) {
+        // 1. Rasterize tool as planar (standard tool raster)
+        const planarToolData = await this.#rasterizePlanar({
+            triangles,
+            zFloor,
+            boundsOverride,
+            isForTool: true
+        });
+
+        // 2. Apply hemispherical morphing for cylindrical surface
+        // Note: This assumes terrainData has already been rasterized and has circumference/maxRadius
+        // We'll defer morphing until generateToolpaths where we have terrainData
+        // For now, just return the planar tool data
+        return planarToolData;
+    }
+
+    async #generateToolpathsRadial({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset, onProgress }) {
+        // 1. Morph tool for cylindrical surface
+        const morphedTool = this.#morphTool(toolData, terrainData, radiusOffset);
+
+        // 2. Stitch radial tiles into dense array for planar toolpath processing
+        const { terrainPositions, bounds } = this.#prepareTerrainForToolpath(terrainData);
+
+        // 3. Generate toolpaths using planar algorithm
+        return new Promise((resolve, reject) => {
+            // Set up progress handler if callback provided
+            if (onProgress) {
+                const progressHandler = (data) => {
+                    onProgress(data.percent, { current: data.current, total: data.total, layer: data.layer });
+                };
+                this.messageHandlers.set('toolpath-progress', progressHandler);
+            }
+
+            const handler = (data) => {
+                // Clean up progress handler
+                if (onProgress) {
+                    this.messageHandlers.delete('toolpath-progress');
+                }
+
+                // Inject bounds for proper visualization
+                data.generationBounds = bounds;
+                resolve(data);
+            };
+
+            this.#sendMessage(
+                'generate-toolpath',
+                {
+                    terrainPositions,
+                    toolPositions: morphedTool.positions,
+                    xStep,
+                    yStep,
+                    zFloor: zFloor ?? 0,
+                    gridStep: this.resolution,
+                    terrainBounds: bounds,
+                    isRadial: true
+                },
                 'toolpath-complete',
                 handler
             );
@@ -268,387 +363,183 @@ export class RasterPath {
     }
 
     /**
-     * Generate radial toolpath (lathe-like operation)
-     * Rotates terrain around X-axis, generates scanline at each angle
-     * @param {Float32Array} terrainTriangles - Terrain mesh triangles
-     * @param {Float32Array} toolPositions - Tool raster (sparse XYZ)
-     * @param {number} xRotationStep - Degrees between each rotation
-     * @param {number} xStep - Sampling step along X-axis
-     * @param {number} zFloor - Z floor value for out-of-bounds
-     * @param {number} gridStep - Rasterization resolution
-     * @param {object} terrainBounds - Terrain bounding box {min: {x,y,z}, max: {x,y,z}}
-     * @param {object} options - Optional settings {onProgress: (percent, info) => {}, batch: true/false}
-     *                           batch: Use GPU buffer reuse for better stability (default: true)
-     * @returns {Promise<{pathData: Float32Array, numRotations: number, pointsPerLine: number, rotationStepDegrees: number, generationTime: number}>}
+     * Morph planar tool to cylindrical surface with hemispherical compensation
+     * @private
      */
-    async generateRadialToolpath(terrainTriangles, toolPositions, xRotationStep, xStep, zFloor, gridStep, terrainBounds, options = {}) {
-        if (!this.isInitialized) {
-            throw new Error('RasterPath not initialized. Call init() first.');
+    #morphTool(planarToolData, terrainData, radiusOffset = 20) {
+        const { positions, bounds, pointCount } = planarToolData;
+        const { circumference, maxRadius } = terrainData;
+
+        debug.log('[RasterPath] Morphing tool for cylindrical surface:', {
+            pointCount,
+            circumference,
+            maxRadius,
+            radiusOffset,
+            toolBounds: bounds
+        });
+
+        // Find tool center and radius for hemispherical morphing
+        const toolCenterX = (bounds.max.x + bounds.min.x) / 2;
+        const toolCenterY = (bounds.max.y + bounds.min.y) / 2;
+        const toolRadiusX = (bounds.max.x - bounds.min.x) / 2;
+        const toolRadiusY = (bounds.max.y - bounds.min.y) / 2;
+        const toolRadius = Math.max(toolRadiusX, toolRadiusY);
+
+        // Modify Z values IN PLACE to apply hemispherical compensation
+        for (let i = 0; i < positions.length; i += 3) {
+            const gridX = positions[i];     // Grid index X (unchanged)
+            const gridY = positions[i + 1]; // Grid index Y (unchanged)
+            const z = positions[i + 2];     // Tool Z value (will be modified)
+
+            // Convert grid indices to world coordinates to calculate distance from center
+            const wx = bounds.min.x + gridX * this.resolution;
+            const wy = bounds.min.y + gridY * this.resolution;
+
+            // Calculate normalized distance from tool center
+            const dx = wx - toolCenterX;
+            const dy = wy - toolCenterY;
+            const distFromCenter = Math.sqrt(dx * dx + dy * dy);
+            const normalizedDist = Math.min(distFromCenter / toolRadius, 1.0);
+
+            // Apply hemispherical morphing (0 at center, increases to toolRadius at edges)
+            const hemisphereZ = toolRadius * (1 - Math.sqrt(1 - normalizedDist * normalizedDist));
+
+            // Add hemisphereZ to create hemisphere shape
+            positions[i + 2] = z + hemisphereZ;
         }
 
-        const startTime = performance.now();
+        // Return the same data object (positions modified in place)
+        return planarToolData;
+    }
 
-        // Calculate tool radius from tool positions (sparse XYZ format)
-        let toolRadius = 0;
-        for (let i = 0; i < toolPositions.length; i += 3) {
-            const gridY = toolPositions[i + 1];
-            const yWorld = gridY * gridStep;
-            toolRadius = Math.max(toolRadius, Math.abs(yWorld));
-        }
-
-        // Generate rotation angles
-        const angles = [];
-        for (let angle = 0; angle < 360; angle += xRotationStep) {
-            angles.push(angle);
-        }
-
-        const useBatch = options.batch !== false;  // Default to true
-        debug.log(`Generating radial toolpath: ${angles.length} rotations at ${xRotationStep}° steps`);
-        debug.log(`Tool radius: ${toolRadius.toFixed(2)}mm`);
-        debug.log(`Buffer reuse: ${useBatch ? 'ENABLED' : 'DISABLED'}`);
-
-        // Use Phase 2A (parallel workers with GPU rotation)
-        // Splits rotations across workers for excellent performance (5-6 seconds for 360 rotations)
-        if (this.workerPool.length > 0 && angles.length >= 4) {
-            debug.log(`[RasterPath] Using Phase 2A (parallel workers with GPU rotation)`);
-            return this._generateRadialToolpathParallel(
-                terrainTriangles, toolPositions, angles, xStep, zFloor,
-                gridStep, terrainBounds, toolRadius, xRotationStep, startTime, options
-            );
-        }
-
-        debug.log(`[RasterPath] Falling back to sequential processing (no workers)`);
-
-        const { onProgress } = options;
-
-        // Process each rotation sequentially
-        const scanlines = [];
-        for (let i = 0; i < angles.length; i++) {
-            const angle = angles[i];
-
-            // Report progress
-            if (onProgress) {
-                const percent = Math.round(((i + 1) / angles.length) * 100);
-                onProgress(percent, { current: i + 1, total: angles.length, angle });
-            }
-
-            // 1. Rotate terrain triangles
-            const rotatedTriangles = this._rotateTrianglesAroundX(terrainTriangles, angle);
-
-            // 2. Define strip bounds (full X, narrow Y band, full Z)
-            const stripBounds = {
-                min: {
-                    x: terrainBounds.min.x,
-                    y: -toolRadius,
-                    z: zFloor
-                },
-                max: {
-                    x: terrainBounds.max.x,
-                    y: toolRadius,
-                    z: ZMAX
-                }
+    /**
+     * Prepare radial terrain for toolpath generation
+     * Handles both tiled and non-tiled radial data
+     * @private
+     */
+    #prepareTerrainForToolpath(terrainData) {
+        // If already a dense array (non-tiled), return as-is
+        if (terrainData.isDense && terrainData.positions) {
+            debug.log('[RasterPath] Using dense radial terrain:', terrainData.gridWidth, 'x', terrainData.gridHeight);
+            return {
+                terrainPositions: terrainData.positions,
+                bounds: terrainData.bounds
             };
+        }
 
-            // 3. Rasterize strip
-            const stripRaster = await this.rasterizeMesh(rotatedTriangles, gridStep, 0, stripBounds);
-            const zeros = stripRaster.positions.filter(v => v === 0).length;
-            if (zeros) console.log({ angle, zeros, pct: zeros/stripRaster.positions.length });
+        // Otherwise, stitch tiles
+        const tiles = terrainData.tiles;
+        const gridHeight = tiles[0].gridHeight; // All tiles have same height (circumference)
+        const stepSize = this.resolution;
 
-            // 4. Generate scanline from strip
-            const scanlineData = await new Promise((resolve, reject) => {
-                const handler = (data) => {
-                    resolve(data);
-                };
+        // Find global X range from tiles (in original STL coordinates)
+        let globalMinX = Infinity;
+        let globalMaxX = -Infinity;
+        for (const tile of tiles) {
+            globalMinX = Math.min(globalMinX, tile.minX);
+            globalMaxX = Math.max(globalMaxX, tile.maxX);
+        }
 
-                this._sendMessage(
-                    'generate-radial-scanline',
-                    {
-                        stripPositions: stripRaster.positions,
-                        stripBounds: stripRaster.bounds,
-                        toolPositions,
-                        xStep,
-                        zFloor,
-                        gridStep
-                    },
-                    'radial-scanline-complete',
-                    handler
-                );
-            });
+        // Calculate total grid width
+        const totalGridWidth = Math.ceil((globalMaxX - globalMinX) / stepSize) + 1;
 
-            scanlines.push(scanlineData.scanline);
+        debug.log('[RasterPath] Stitching', tiles.length, 'tiles into', totalGridWidth, 'x', gridHeight, 'dense array');
+        debug.log('[RasterPath] Global X range:', globalMinX, 'to', globalMaxX);
 
-            if (i === 0) {
-                debug.log(`  Scanline output: ${scanlineData.scanline.length} points`);
+        // Create single dense array (row-major: Y * width + X)
+        const terrainPositions = new Float32Array(totalGridWidth * gridHeight);
+        terrainPositions.fill(EMPTY_CELL);
+
+        for (let tileIdx = 0; tileIdx < tiles.length; tileIdx++) {
+            const tile = tiles[tileIdx];
+            const tileGridWidth = tile.gridWidth;
+            const tileGridHeight = tile.gridHeight;
+
+            // Calculate this tile's offset in the global grid
+            const tileStartGridX = Math.round((tile.minX - globalMinX) / stepSize);
+
+            debug.log(`[RasterPath] Tile ${tileIdx}: minX=${tile.minX}, gridWidth=${tileGridWidth}, startGridX=${tileStartGridX}`);
+
+            for (let gy = 0; gy < tileGridHeight; gy++) {
+                for (let gx = 0; gx < tileGridWidth; gx++) {
+                    const localTileIdx = gy * tileGridWidth + gx;
+                    const globalGx = tileStartGridX + gx;
+                    const globalIdx = gy * totalGridWidth + globalGx;
+
+                    if (globalGx < 0 || globalGx >= totalGridWidth) {
+                        debug.warn(`[RasterPath] OUT OF BOUNDS! tile ${tileIdx}, gx=${gx}, globalGx=${globalGx}, totalGridWidth=${totalGridWidth}`);
+                        continue;
+                    }
+
+                    terrainPositions[globalIdx] = tile.data[localTileIdx];
+                }
             }
         }
 
-        const endTime = performance.now();
-        const generationTime = endTime - startTime;
-
-        // Combine scanlines into single Float32Array
-        const pointsPerLine = scanlines[0].length;
-        debug.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
-        const pathData = new Float32Array(angles.length * pointsPerLine);
-        for (let i = 0; i < scanlines.length; i++) {
-            pathData.set(scanlines[i], i * pointsPerLine);
+        // Count empty cells for diagnostics
+        let emptyCells = 0;
+        for (let i = 0; i < terrainPositions.length; i++) {
+            if (terrainPositions[i] <= -1e9) emptyCells++;
         }
+        debug.log('[RasterPath] Stitched terrain:', terrainPositions.length, 'cells,', emptyCells, 'empty (', (emptyCells / terrainPositions.length * 100).toFixed(1), '%)');
 
-        debug.log(`✅ Radial toolpath complete: ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
-
-        return {
-            pathData,
-            numRotations: angles.length,
-            pointsPerLine,
-            rotationStepDegrees: xRotationStep,
-            generationTime
-        };
-    }
-
-    /**
-     * Generate radial toolpath using parallel workers
-     * Internal method - called by generateRadialToolpath when worker pool is available
-     */
-    async _generateRadialToolpathParallel(terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, xRotationStep, startTime, options = {}) {
-        const numWorkers = this.workerPool.length;
-        const { onProgress } = options;
-
-        // Split angles across workers
-        const anglesPerWorker = Math.ceil(angles.length / numWorkers);
-        const workerTasks = [];
-
-        for (let workerIdx = 0; workerIdx < numWorkers; workerIdx++) {
-            const startIdx = workerIdx * anglesPerWorker;
-            const endIdx = Math.min(startIdx + anglesPerWorker, angles.length);
-            if (startIdx >= angles.length) break;
-
-            const workerAngles = angles.slice(startIdx, endIdx);
-            workerTasks.push({
-                workerIdx,
-                workerState: this.workerPool[workerIdx],
-                angles: workerAngles,
-                startIdx,
-                endIdx
-            });
-        }
-
-        debug.log(`[RasterPath] Split ${angles.length} rotations across ${workerTasks.length} workers`);
-
-        // Shared progress tracker (aggregate across all workers)
-        let completedRotations = 0;
-        const progressCallback = onProgress ? (rotationsComplete) => {
-            completedRotations += rotationsComplete;
-            const percent = Math.round((completedRotations / angles.length) * 100);
-            onProgress(percent, { current: completedRotations, total: angles.length });
-        } : null;
-
-        // Process all worker tasks in parallel
-        const workerPromises = workerTasks.map(task =>
-            this._processWorkerRotations(
-                task.workerState,
-                task.workerIdx,
-                terrainTriangles,
-                toolPositions,
-                task.angles,
-                xStep,
-                zFloor,
-                gridStep,
-                terrainBounds,
-                toolRadius,
-                progressCallback,
-                options
-            )
-        );
-
-        // Wait for all workers to complete
-        const workerResults = await Promise.all(workerPromises);
-
-        // Combine results in correct order
-        const allScanlines = [];
-        for (const result of workerResults) {
-            allScanlines.push(...result.scanlines);
-        }
-
-        const endTime = performance.now();
-        const generationTime = endTime - startTime;
-
-        // Combine scanlines into single Float32Array
-        const pointsPerLine = allScanlines[0].length;
-        debug.log(`Total scanline output: ${pointsPerLine} points per line, ${angles.length} lines`);
-        const pathData = new Float32Array(angles.length * pointsPerLine);
-        for (let i = 0; i < allScanlines.length; i++) {
-            pathData.set(allScanlines[i], i * pointsPerLine);
-        }
-
-        debug.log(`✅ Radial toolpath complete (parallel): ${angles.length} rotations × ${pointsPerLine} points in ${generationTime.toFixed(1)}ms`);
-
-        return {
-            pathData,
-            numRotations: angles.length,
-            pointsPerLine,
-            rotationStepDegrees: xRotationStep,
-            generationTime
-        };
-    }
-
-    /**
-     * Process rotations for a single worker
-     * Internal method - processes a subset of angles in one worker
-     */
-    async _processWorkerRotations(workerState, workerIdx, terrainTriangles, toolPositions, angles, xStep, zFloor, gridStep, terrainBounds, toolRadius, progressCallback = null, options = {}) {
-        const scanlines = [];
-        const useBatch = options.batch !== false;  // Default to true
-
-        // Define strip bounds (narrow band for rasterization)
-        const stripBounds = {
+        // Create bounds using original STL X coordinates
+        const bounds = {
             min: {
-                x: terrainBounds.min.x,
-                y: -toolRadius,
-                z: zFloor
+                x: globalMinX,  // Original STL X min
+                y: 0,           // Angle starts at 0
+                z: terrainData.bounds.min.z
             },
             max: {
-                x: terrainBounds.max.x,
-                y: toolRadius,
-                z: ZMAX
+                x: globalMaxX,              // Original STL X max
+                y: terrainData.circumference,  // Full circumference
+                z: terrainData.bounds.max.z
             }
         };
 
-        if (useBatch) {
-            // BATCH MODE: Single rasterize-batch call with buffer reuse
-            debug.log(`[RasterPath Worker ${workerIdx}] Using batch rasterization for ${angles.length} angles`);
+        debug.log('[RasterPath] Bounds:', bounds);
 
-            const batchResults = await new Promise((resolve, reject) => {
-                let lastProgressReported = 0;
+        return {
+            terrainPositions,
+            bounds
+        };
+    }
 
-                // Custom handler to capture both progress and completion
-                const messageHandler = (e) => {
-                    const { type, data } = e.data;
+    // ============================================================================
+    // Internal Utilities
+    // ============================================================================
 
-                    if (type === 'rasterize-batch-progress') {
-                        // Intermediate progress during rasterization
-                        if (progressCallback) {
-                            const anglesSinceLastReport = data.current - lastProgressReported;
-                            lastProgressReported = data.current;
-                            progressCallback(anglesSinceLastReport);
-                        }
-                    } else if (type === 'rasterize-batch-complete') {
-                        // Final completion
-                        workerState.worker.removeEventListener('message', messageHandler);
-                        resolve(data);
-                    } else if (type === 'error') {
-                        workerState.worker.removeEventListener('message', messageHandler);
-                        reject(new Error(data.message));
-                    }
-                };
+    #handleMessage(e) {
+        const { type, success, data } = e.data;
 
-                workerState.worker.addEventListener('message', messageHandler);
-
-                // Send the batch rasterize request
-                // NOTE: Don't transfer buffer when using parallel workers - each needs a copy
-                workerState.worker.postMessage({
-                    type: 'rasterize-batch',
-                    data: {
-                        triangles: terrainTriangles,
-                        stepSize: gridStep,
-                        filterMode: 0,
-                        isForTool: false,
-                        boundsOverride: stripBounds,
-                        rotationAngles: angles
-                    }
-                });  // No transfer list - buffer will be copied to each worker
-            });
-
-            // Process each rasterized strip into a scanline
-            // Note: This is currently CPU work. Progress reporting happens during rasterization,
-            // but we could add visual feedback here if scanline generation becomes slow.
-            if (progressCallback && batchResults.results.length > 0) {
-                debug.log(`[RasterPath Worker ${workerIdx}] Starting scanline generation for ${batchResults.results.length} strips`);
-            }
-
-            for (let i = 0; i < batchResults.results.length; i++) {
-                const stripRaster = batchResults.results[i];
-
-                // Generate scanline from strip
-                const scanlineData = await new Promise((resolve, reject) => {
-                    const handler = (data) => resolve(data);
-                    this._sendWorkerMessage(
-                        workerState,
-                        'generate-radial-scanline',
-                        {
-                            stripPositions: stripRaster.positions,
-                            stripBounds: stripRaster.bounds,
-                            toolPositions,
-                            xStep,
-                            zFloor,
-                            gridStep
-                        },
-                        'radial-scanline-complete',
-                        handler
-                    );
-                });
-
-                scanlines.push(scanlineData.scanline);
-            }
-
-            if (progressCallback && batchResults.results.length > 0) {
-                debug.log(`[RasterPath Worker ${workerIdx}] Scanline generation complete`);
-            }
-
-        } else {
-            // LEGACY MODE: Individual rasterize calls (no buffer reuse)
-            debug.log(`[RasterPath Worker ${workerIdx}] Using legacy mode (no buffer reuse) for ${angles.length} angles`);
-
-            for (let i = 0; i < angles.length; i++) {
-                const angle = angles[i];
-
-                // 2. Rasterize strip using this worker (GPU will rotate triangles)
-                const stripRaster = await new Promise((resolve, reject) => {
-                    const handler = (data) => resolve(data);
-                    this._sendWorkerMessage(
-                        workerState,
-                        'rasterize',
-                        {
-                            triangles: terrainTriangles,  // Pass unrotated triangles
-                            stepSize: gridStep,
-                            filterMode: 0,
-                            isForTool: false,
-                            boundsOverride: stripBounds,
-                            rotationAngleDeg: angle  // GPU will apply rotation
-                        },
-                        'rasterize-complete',
-                        handler
-                    );
-                });
-
-                // 4. Generate scanline from strip using this worker
-                const scanlineData = await new Promise((resolve, reject) => {
-                    const handler = (data) => resolve(data);
-                    this._sendWorkerMessage(
-                        workerState,
-                        'generate-radial-scanline',
-                        {
-                            stripPositions: stripRaster.positions,
-                            stripBounds: stripRaster.bounds,
-                            toolPositions,
-                            xStep,
-                            zFloor,
-                            gridStep
-                        },
-                        'radial-scanline-complete',
-                        handler
-                    );
-                });
-
-                scanlines.push(scanlineData.scanline);
-
-                // Report progress for this completed rotation
-                if (progressCallback) {
-                    progressCallback(1);  // Report 1 rotation completed
-                }
+        // Handle progress messages (don't delete handler)
+        if (type === 'rasterize-progress' || type === 'toolpath-progress' || type === 'rasterize-batch-progress') {
+            const handler = this.messageHandlers.get(type);
+            if (handler) {
+                handler(data);
+                return;
             }
         }
 
-        return { scanlines };
+        // Find handler for this message type (completion messages)
+        for (const [id, handler] of this.messageHandlers.entries()) {
+            if (handler.responseType === type) {
+                this.messageHandlers.delete(id);
+                handler.callback(data);
+                break;
+            }
+        }
     }
+
+    #sendMessage(type, data, responseType, callback) {
+        const id = this.messageId++;
+        this.messageHandlers.set(id, { responseType, callback });
+        this.worker.postMessage({ type, data });
+    }
+
+    // ============================================================================
+    // Public Utilities
+    // ============================================================================
 
     /**
      * Get device capabilities
@@ -663,173 +554,36 @@ export class RasterPath {
      * @returns {object} Current configuration
      */
     getConfig() {
-        return { ...this.config };
-    }
-
-    /**
-     * Update configuration at runtime
-     * @param {object} newConfig - Partial config to update
-     */
-    updateConfig(newConfig) {
-        this.config = { ...this.config, ...newConfig };
-        if (this.isInitialized) {
-            this._sendMessage('update-config', { config: this.config }, null, () => {});
-        }
-    }
-
-    /**
-     * Estimate memory requirements for a rasterization job
-     * @param {object} bounds - Bounding box {min: {x, y, z}, max: {x, y, z}}
-     * @param {number} stepSize - Grid resolution
-     * @returns {object} Memory estimation details
-     */
-    estimateMemory(bounds, stepSize) {
-        const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / stepSize) + 1;
-        const gridHeight = Math.ceil((bounds.max.y - bounds.min.y) / stepSize) + 1;
-        const totalPoints = gridWidth * gridHeight;
-
-        const gpuOutputBuffer = totalPoints * 3 * 4; // positions
-        const gpuMaskBuffer = totalPoints * 4; // valid mask
-        const totalGPUMemory = gpuOutputBuffer + gpuMaskBuffer;
-
-        const maxSafeSize = this.deviceCapabilities
-            ? this.deviceCapabilities.maxStorageBufferBindingSize * this.config.gpuMemorySafetyMargin
-            : this.config.maxGPUMemoryMB * 1024 * 1024;
-
-        const needsTiling = totalGPUMemory > maxSafeSize;
-
         return {
-            gridWidth,
-            gridHeight,
-            totalPoints,
-            gpuMemoryMB: totalGPUMemory / (1024 * 1024),
-            maxSafeMB: maxSafeSize / (1024 * 1024),
-            needsTiling,
-            estimatedTiles: needsTiling ? this._estimateTileCount(bounds, stepSize, maxSafeSize) : 1
+            mode: this.mode,
+            resolution: this.resolution,
+            rotationStep: this.rotationStep,
+            ...this.config
         };
     }
 
     /**
-     * Query if a job will use tiling
-     * @param {object} bounds - Bounding box
-     * @param {number} stepSize - Grid resolution
-     * @returns {boolean} True if tiling will be used
+     * Parse STL buffer to triangles
+     * @param {ArrayBuffer} buffer - Binary STL data
+     * @returns {Float32Array} Triangle vertices
      */
-    willUseTiling(bounds, stepSize) {
-        if (!this.config.autoTiling) return false;
-        const estimate = this.estimateMemory(bounds, stepSize);
-        return estimate.needsTiling;
-    }
-
-    /**
-     * Dispose of worker and cleanup resources
-     */
-    dispose() {
-        if (this.worker) {
-            this.worker.terminate();
-            this.worker = null;
-            this.isInitialized = false;
-            this.messageHandlers.clear();
-            this.deviceCapabilities = null;
-        }
-
-        // Clean up worker pool
-        for (const workerState of this.workerPool) {
-            workerState.worker.terminate();
-            workerState.messageHandlers.clear();
-        }
-        this.workerPool = [];
-    }
-
-    // Internal methods
-
-    _estimateTileCount(bounds, stepSize, maxSafeSize) {
-        const width = bounds.max.x - bounds.min.x;
-        const height = bounds.max.y - bounds.min.y;
-
-        // Binary search for optimal tile dimension
-        let low = this.config.minTileSize;
-        let high = Math.max(width, height);
-        let bestTileDim = high;
-
-        while (low <= high) {
-            const mid = (low + high) / 2;
-            const gridW = Math.ceil(mid / stepSize);
-            const gridH = Math.ceil(mid / stepSize);
-            const memoryNeeded = gridW * gridH * 4 * 4; // 4 bytes per coord * 4 coords (3 pos + 1 mask)
-
-            if (memoryNeeded <= maxSafeSize) {
-                bestTileDim = mid;
-                low = mid + 1;
-            } else {
-                high = mid - 1;
-            }
-        }
-
-        const tilesX = Math.ceil(width / bestTileDim);
-        const tilesY = Math.ceil(height / bestTileDim);
-        return tilesX * tilesY;
-    }
-
-    _handleMessage(e) {
-        const { type, success, data } = e.data;
-
-        // Find handler for this message type
-        for (const [id, handler] of this.messageHandlers.entries()) {
-            if (handler.responseType === type) {
-                this.messageHandlers.delete(id);
-                if (type === 'webgpu-ready') {
-                    handler.callback(data);
-                } else {
-                    handler.callback(data);
-                }
-                break;
-            }
-        }
-    }
-
-    _sendMessage(type, data, responseType, callback) {
-        const id = this.messageId++;
-        this.messageHandlers.set(id, { responseType, callback });
-        this.worker.postMessage({ type, data });
-    }
-
-    _handleWorkerMessage(workerState, e) {
-        const { type, success, data } = e.data;
-
-        // Find handler for this message type in this worker's handlers
-        for (const [id, handler] of workerState.messageHandlers.entries()) {
-            if (handler.responseType === type) {
-                workerState.messageHandlers.delete(id);
-                handler.callback(data);
-                break;
-            }
-        }
-    }
-
-    _sendWorkerMessage(workerState, type, data, responseType, callback) {
-        const id = workerState.messageId++;
-        workerState.messageHandlers.set(id, { responseType, callback });
-        workerState.worker.postMessage({ type, data });
-    }
-
-    _parseSTL(buffer) {
+    parseSTL(buffer) {
         const view = new DataView(buffer);
-        const isASCII = this._isASCIISTL(buffer);
+        const isASCII = this.#isASCIISTL(buffer);
 
         if (isASCII) {
-            return this._parseASCIISTL(buffer);
+            return this.#parseASCIISTL(buffer);
         } else {
-            return this._parseBinarySTL(view);
+            return this.#parseBinarySTL(view);
         }
     }
 
-    _isASCIISTL(buffer) {
+    #isASCIISTL(buffer) {
         const text = new TextDecoder().decode(buffer.slice(0, 80));
         return text.toLowerCase().startsWith('solid');
     }
 
-    _parseASCIISTL(buffer) {
+    #parseASCIISTL(buffer) {
         const text = new TextDecoder().decode(buffer);
         const lines = text.split('\n');
         const triangles = [];
@@ -857,7 +611,7 @@ export class RasterPath {
         return new Float32Array(triangles);
     }
 
-    _parseBinarySTL(view) {
+    #parseBinarySTL(view) {
         const numTriangles = view.getUint32(80, true);
         const triangles = new Float32Array(numTriangles * 9); // 3 vertices * 3 components
 
@@ -880,27 +634,4 @@ export class RasterPath {
 
         return triangles;
     }
-
-    _rotateTrianglesAroundX(triangles, angleDegrees) {
-        const rad = angleDegrees * Math.PI / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        const rotated = new Float32Array(triangles.length);
-
-        // Rotate each vertex: X stays same, Y and Z rotate
-        for (let i = 0; i < triangles.length; i += 3) {
-            const x = triangles[i];
-            const y = triangles[i + 1];
-            const z = triangles[i + 2];
-
-            rotated[i] = x;                      // X unchanged
-            rotated[i + 1] = y * cos - z * sin;  // Y' = Y*cos - Z*sin
-            rotated[i + 2] = y * sin + z * cos;  // Z' = Y*sin + Z*cos
-        }
-
-        return rotated;
-    }
 }
-
-// Note: Direct worker export removed to support both src and build directory structures
-// The worker is managed internally by the RasterPath class

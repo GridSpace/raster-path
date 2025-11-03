@@ -25,6 +25,16 @@ const debug = {
     log: quiet ? function(){} : console.log
 };
 
+// Global error handler for uncaught errors in worker
+self.addEventListener('error', (event) => {
+    console.error('[WebGPU Worker] Uncaught error:', event.error || event.message);
+    console.error('[WebGPU Worker] Stack:', event.error?.stack);
+});
+
+self.addEventListener('unhandledrejection', (event) => {
+    console.error('[WebGPU Worker] Unhandled promise rejection:', event.reason);
+});
+
 // Initialize WebGPU device in worker context
 async function initWebGPU() {
     if (isInitialized) return true;
@@ -96,289 +106,17 @@ async function initWebGPU() {
     }
 }
 
-const rasterizeShaderCode = `
-// Sentinel value for empty cells (far below any real geometry)
-const EMPTY_CELL: f32 = -1e10;
+// Planar rasterization with spatial partitioning
+const rasterizeShaderCode = /*SHADER:planar-rasterize*/;
 
-struct Uniforms {
-    bounds_min_x: f32,
-    bounds_min_y: f32,
-    bounds_min_z: f32,
-    bounds_max_x: f32,
-    bounds_max_y: f32,
-    bounds_max_z: f32,
-    step_size: f32,
-    grid_width: u32,
-    grid_height: u32,
-    triangle_count: u32,
-    filter_mode: u32,  // 0 = UPWARD (terrain, keep highest), 1 = DOWNWARD (tool, keep lowest)
-    spatial_grid_width: u32,
-    spatial_grid_height: u32,
-    spatial_cell_size: f32,
-}
+// Planar toolpath generation
+const toolpathShaderCode = /*SHADER:planar-toolpath*/;
 
-@group(0) @binding(0) var<storage, read> triangles: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output_points: array<f32>;
-@group(0) @binding(2) var<storage, read_write> valid_mask: array<u32>;
-@group(0) @binding(3) var<uniform> uniforms: Uniforms;
-@group(0) @binding(4) var<storage, read> spatial_cell_offsets: array<u32>;
-@group(0) @binding(5) var<storage, read> spatial_triangle_indices: array<u32>;
+// Radial Pass 1: Triangle culling by X-range (bit-attention)
+const radialCullShaderCode = /*SHADER:radial-cull*/;
 
-// Fast 2D bounding box check for XY plane
-fn ray_hits_triangle_bbox_2d(ray_x: f32, ray_y: f32, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
-    let min_x = min(min(v0.x, v1.x), v2.x);
-    let max_x = max(max(v0.x, v1.x), v2.x);
-    let min_y = min(min(v0.y, v1.y), v2.y);
-    let max_y = max(max(v0.y, v1.y), v2.y);
-
-    return ray_x >= min_x && ray_x <= max_x && ray_y >= min_y && ray_y <= max_y;
-}
-
-// Ray-triangle intersection using Möller-Trumbore algorithm
-fn ray_triangle_intersect(
-    ray_origin: vec3<f32>,
-    ray_dir: vec3<f32>,
-    v0: vec3<f32>,
-    v1: vec3<f32>,
-    v2: vec3<f32>
-) -> vec2<f32> {  // Returns (hit: 0.0 or 1.0, z: intersection_z)
-    let EPSILON = 0.0000001;
-
-    // Early rejection using 2D bounding box (very cheap!)
-    if (!ray_hits_triangle_bbox_2d(ray_origin.x, ray_origin.y, v0, v1, v2)) {
-        return vec2<f32>(0.0, 0.0);
-    }
-
-    // Calculate edges
-    let edge1 = v1 - v0;
-    let edge2 = v2 - v0;
-
-    // Cross product: ray_dir × edge2
-    let h = cross(ray_dir, edge2);
-
-    // Dot product: edge1 · h
-    let a = dot(edge1, h);
-
-    if (a > -EPSILON && a < EPSILON) {
-        return vec2<f32>(0.0, 0.0); // Ray parallel to triangle
-    }
-
-    let f = 1.0 / a;
-
-    // s = ray_origin - v0
-    let s = ray_origin - v0;
-
-    // u = f * (s · h)
-    let u = f * dot(s, h);
-
-    // Allow small tolerance for edges/vertices to ensure watertight coverage
-    if (u < -EPSILON || u > 1.0 + EPSILON) {
-        return vec2<f32>(0.0, 0.0);
-    }
-
-    // Cross product: s × edge1
-    let q = cross(s, edge1);
-
-    // v = f * (ray_dir · q)
-    let v = f * dot(ray_dir, q);
-
-    // Allow small tolerance for edges/vertices to ensure watertight coverage
-    if (v < -EPSILON || u + v > 1.0 + EPSILON) {
-        return vec2<f32>(0.0, 0.0);
-    }
-
-    // t = f * (edge2 · q)
-    let t = f * dot(edge2, q);
-
-    if (t > EPSILON) {
-        // Intersection found - calculate Z coordinate
-        let intersection_z = ray_origin.z + ray_dir.z * t;
-        return vec2<f32>(1.0, intersection_z);
-    }
-
-    return vec2<f32>(0.0, 0.0);
-}
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let grid_x = global_id.x;
-    let grid_y = global_id.y;
-
-    if (grid_x >= uniforms.grid_width || grid_y >= uniforms.grid_height) {
-        return;
-    }
-
-    // Calculate world position for this grid point (center of cell)
-    let world_x = uniforms.bounds_min_x + f32(grid_x) * uniforms.step_size;
-    let world_y = uniforms.bounds_min_y + f32(grid_y) * uniforms.step_size;
-
-    // Initialize best_z based on filter mode
-    var best_z: f32;
-    if (uniforms.filter_mode == 0u) {
-        best_z = -1e10;  // Terrain: keep highest Z
-    } else {
-        best_z = 1e10;   // Tool: keep lowest Z
-    }
-
-    var found = false;
-
-    // Ray from below mesh pointing up (+Z direction)
-    let ray_origin = vec3<f32>(world_x, world_y, uniforms.bounds_min_z - 1.0);
-    let ray_dir = vec3<f32>(0.0, 0.0, 1.0);
-
-    // Find which spatial grid cell this ray belongs to
-    let spatial_cell_x = u32((world_x - uniforms.bounds_min_x) / uniforms.spatial_cell_size);
-    let spatial_cell_y = u32((world_y - uniforms.bounds_min_y) / uniforms.spatial_cell_size);
-
-    // Clamp to spatial grid bounds
-    let clamped_cx = min(spatial_cell_x, uniforms.spatial_grid_width - 1u);
-    let clamped_cy = min(spatial_cell_y, uniforms.spatial_grid_height - 1u);
-
-    let spatial_cell_idx = clamped_cy * uniforms.spatial_grid_width + clamped_cx;
-
-    // Get triangle range for this cell
-    let start_idx = spatial_cell_offsets[spatial_cell_idx];
-    let end_idx = spatial_cell_offsets[spatial_cell_idx + 1u];
-
-    // Test only triangles in this spatial cell
-    for (var idx = start_idx; idx < end_idx; idx++) {
-        let tri_idx = spatial_triangle_indices[idx];
-        let tri_base = tri_idx * 9u;
-
-        // Read triangle vertices (already in local space and rotated if needed)
-        let v0 = vec3<f32>(
-            triangles[tri_base],
-            triangles[tri_base + 1u],
-            triangles[tri_base + 2u]
-        );
-        let v1 = vec3<f32>(
-            triangles[tri_base + 3u],
-            triangles[tri_base + 4u],
-            triangles[tri_base + 5u]
-        );
-        let v2 = vec3<f32>(
-            triangles[tri_base + 6u],
-            triangles[tri_base + 7u],
-            triangles[tri_base + 8u]
-        );
-
-        let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
-        let hit = result.x;
-        let intersection_z = result.y;
-
-        if (hit > 0.5) {
-            if (uniforms.filter_mode == 0u) {
-                // Terrain: keep highest
-                if (intersection_z > best_z) {
-                    best_z = intersection_z;
-                    found = true;
-                }
-            } else {
-                // Tool: keep lowest
-                if (intersection_z < best_z) {
-                    best_z = intersection_z;
-                    found = true;
-                }
-            }
-        }
-    }
-
-    // Write output based on filter mode
-    let output_idx = grid_y * uniforms.grid_width + grid_x;
-
-    if (uniforms.filter_mode == 0u) {
-        // Terrain: Dense output (Z-only, sentinel value for empty cells)
-        if (found) {
-            output_points[output_idx] = best_z;
-        } else {
-            output_points[output_idx] = EMPTY_CELL;
-        }
-    } else {
-        // Tool: Sparse output (X, Y, Z triplets with valid mask)
-        output_points[output_idx * 3u] = f32(grid_x);
-        output_points[output_idx * 3u + 1u] = f32(grid_y);
-        output_points[output_idx * 3u + 2u] = best_z;
-
-        if (found) {
-            valid_mask[output_idx] = 1u;
-        } else {
-            valid_mask[output_idx] = 0u;
-        }
-    }
-}
-`;
-
-const toolpathShaderCode = `
-// Sentinel value for empty terrain cells (must match rasterize shader)
-const EMPTY_CELL: f32 = -1e10;
-
-struct SparseToolPoint {
-    x_offset: i32,
-    y_offset: i32,
-    z_value: f32,
-    padding: f32,
-}
-
-struct Uniforms {
-    terrain_width: u32,
-    terrain_height: u32,
-    tool_count: u32,
-    x_step: u32,
-    y_step: u32,
-    oob_z: f32,
-    points_per_line: u32,
-    num_scanlines: u32,
-}
-
-@group(0) @binding(0) var<storage, read> terrain_map: array<f32>;
-@group(0) @binding(1) var<storage, read> sparse_tool: array<SparseToolPoint>;
-@group(0) @binding(2) var<storage, read_write> output_path: array<f32>;
-@group(0) @binding(3) var<uniform> uniforms: Uniforms;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let scanline = global_id.y;
-    let point_idx = global_id.x;
-
-    if (scanline >= uniforms.num_scanlines || point_idx >= uniforms.points_per_line) {
-        return;
-    }
-
-    let tool_center_x = i32(point_idx * uniforms.x_step);
-    let tool_center_y = i32(scanline * uniforms.y_step);
-
-    var min_delta = 3.402823466e+38;
-
-    for (var i = 0u; i < uniforms.tool_count; i++) {
-        let tool_point = sparse_tool[i];
-        let terrain_x = tool_center_x + tool_point.x_offset;
-        let terrain_y = tool_center_y + tool_point.y_offset;
-
-        if (terrain_x < 0 || terrain_y < 0 ||
-            terrain_x >= i32(uniforms.terrain_width) ||
-            terrain_y >= i32(uniforms.terrain_height)) {
-            continue;
-        }
-
-        let terrain_idx = u32(terrain_y) * uniforms.terrain_width + u32(terrain_x);
-        let terrain_z = terrain_map[terrain_idx];
-
-        // Check if terrain cell has geometry (not empty sentinel value)
-        if (terrain_z > EMPTY_CELL + 1.0) {
-            let delta = tool_point.z_value - terrain_z;
-            min_delta = min(min_delta, delta);
-        }
-    }
-
-    var output_z = uniforms.oob_z;
-    if (min_delta < 3.402823466e+38) {
-        output_z = -min_delta;
-    }
-
-    let output_idx = scanline * uniforms.points_per_line + point_idx;
-    output_path[output_idx] = output_z;
-}
-`;
+// Radial Pass 2: Rasterization with bit-attention
+const radialRasterizeShaderCode = /*SHADER:radial-rasterize*/;
 
 // Calculate bounding box from triangle vertices
 function calculateBounds(triangles) {
@@ -2120,6 +1858,318 @@ function generateRadialScanline(data) {
     };
 }
 
+// Radial rasterization - two-pass tiled with bit-attention
+const TRIANGLES_PER_TILE = 25000; // Target triangles per X-tile
+
+let cachedRadialCullPipeline = null;
+let cachedRadialRasterizePipeline = null;
+
+async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor = 0, boundsOverride = null) {
+    const startTime = performance.now();
+
+    if (!isInitialized) {
+        await initWebGPU();
+    }
+
+    // Check if SharedArrayBuffer is available and triangle data is large (>1M triangles = 9M floats = 36MB)
+    const numTriangles = triangles.length / 9;
+    const useSharedBuffer = typeof SharedArrayBuffer !== 'undefined' &&
+                           numTriangles > 1000000 &&
+                           !(triangles.buffer instanceof SharedArrayBuffer);
+
+    if (useSharedBuffer) {
+        debug.log(`[WebGPU Worker] Large dataset (${numTriangles.toLocaleString()} triangles), converting to SharedArrayBuffer`);
+        const sab = new SharedArrayBuffer(triangles.byteLength);
+        const sharedTriangles = new Float32Array(sab);
+        sharedTriangles.set(triangles);
+        triangles = sharedTriangles;
+    }
+
+    const bounds = boundsOverride || calculateBounds(triangles);
+
+    // Calculate max radius (distance from X-axis)
+    let maxRadius = 0;
+    for (let i = 0; i < triangles.length; i += 3) {
+        const y = triangles[i + 1];
+        const z = triangles[i + 2];
+        const radius = Math.sqrt(y * y + z * z);
+        maxRadius = Math.max(maxRadius, radius);
+    }
+
+    // Add margin for ray origins to start outside mesh
+    maxRadius *= 1.2;
+
+    const circumference = 2 * Math.PI * maxRadius;
+    const xRange = bounds.max.x - bounds.min.x;
+    const rotationStepRadians = rotationStepDegrees * (Math.PI / 180);
+
+    // Calculate X-tiles
+    const numTiles = Math.ceil(numTriangles / TRIANGLES_PER_TILE);
+    const tileWidth = xRange / numTiles;
+
+    debug.log(`[WebGPU Worker] Radial: ${numTriangles} triangles, ${numTiles} X-tiles (width: ${tileWidth.toFixed(2)}mm)`);
+
+    // Create pipelines on first use
+    if (!cachedRadialCullPipeline) {
+        const cullShaderModule = device.createShaderModule({ code: radialCullShaderCode });
+        cachedRadialCullPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cullShaderModule, entryPoint: 'main' }
+        });
+        debug.log('[WebGPU Worker] Created radial cull pipeline');
+    }
+
+    if (!cachedRadialRasterizePipeline) {
+        const rasterShaderModule = device.createShaderModule({ code: radialRasterizeShaderCode });
+        cachedRadialRasterizePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: rasterShaderModule, entryPoint: 'main' }
+        });
+        debug.log('[WebGPU Worker] Created radial rasterize pipeline');
+    }
+
+    // Create shared triangle buffer
+    const triangleBuffer = device.createBuffer({
+        size: triangles.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(triangleBuffer, 0, triangles);
+
+    // Calculate attention bit array size
+    const numWords = Math.ceil(numTriangles / 32);
+    debug.log(`[WebGPU Worker] Attention array: ${numWords} words (${numWords * 4} bytes)`);
+
+    // Helper function to process a single tile
+    async function processTile(tileIdx) {
+        const prefix = `[WebGPU Worker] Tile ${tileIdx + 1}/${numTiles}:`;
+        try {
+            const tile_min_x = bounds.min.x + tileIdx * tileWidth;
+            const tile_max_x = bounds.min.x + (tileIdx + 1) * tileWidth;
+
+            debug.log(`${prefix} X=[${tile_min_x.toFixed(2)}, ${tile_max_x.toFixed(2)}]`);
+
+        // Pass 1: Cull triangles for this X-tile
+        const tileStartTime = performance.now();
+
+        const attentionBuffer = device.createBuffer({
+            size: numWords * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+
+        // Clear attention buffer
+        const zeros = new Uint32Array(numWords);
+        device.queue.writeBuffer(attentionBuffer, 0, zeros);
+
+        const cullUniformData = new Float32Array(4);
+        cullUniformData[0] = tile_min_x;
+        cullUniformData[1] = tile_max_x;
+        const cullUniformU32 = new Uint32Array(cullUniformData.buffer);
+        cullUniformU32[2] = numTriangles;
+
+        const cullUniformBuffer = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(cullUniformBuffer, 0, cullUniformData);
+
+        const cullBindGroup = device.createBindGroup({
+            layout: cachedRadialCullPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: triangleBuffer } },
+                { binding: 1, resource: { buffer: attentionBuffer } },
+                { binding: 2, resource: { buffer: cullUniformBuffer } },
+            ],
+        });
+
+        const cullEncoder = device.createCommandEncoder();
+        const cullPass = cullEncoder.beginComputePass();
+        cullPass.setPipeline(cachedRadialCullPipeline);
+        cullPass.setBindGroup(0, cullBindGroup);
+        cullPass.dispatchWorkgroups(Math.ceil(numTriangles / 256));
+        cullPass.end();
+        device.queue.submit([cullEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+
+        const cullTime = performance.now() - tileStartTime;
+        // debug.log(`[WebGPU Worker]   Culling: ${cullTime.toFixed(1)}ms`);
+
+        // Pass 2: Rasterize this X-tile
+        const rasterStartTime = performance.now();
+
+        const gridWidth = Math.ceil(tileWidth / stepSize) + 1;
+        const gridHeight = Math.ceil(360 / rotationStepDegrees) + 1; // Number of angular samples
+        const totalCells = gridWidth * gridHeight;
+
+        // debug.log(`[WebGPU Worker]   Grid: ${gridWidth}×${gridHeight} = ${totalCells} cells`);
+
+        const outputBuffer = device.createBuffer({
+            size: totalCells * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        });
+
+        // Initialize with EMPTY_CELL
+        const initData = new Float32Array(totalCells);
+        initData.fill(EMPTY_CELL);
+        device.queue.writeBuffer(outputBuffer, 0, initData);
+
+        const rasterUniformData = new Float32Array(16);
+        rasterUniformData[0] = tile_min_x;
+        rasterUniformData[1] = tile_max_x;
+        rasterUniformData[2] = maxRadius;
+        rasterUniformData[3] = rotationStepRadians;
+        rasterUniformData[4] = stepSize;
+        rasterUniformData[5] = zFloor;
+        const rasterUniformU32 = new Uint32Array(rasterUniformData.buffer);
+        rasterUniformU32[6] = gridWidth;
+        rasterUniformU32[7] = gridHeight;
+        rasterUniformU32[8] = numTriangles;
+        rasterUniformU32[9] = numWords;
+
+        const rasterUniformBuffer = device.createBuffer({
+            size: 64,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(rasterUniformBuffer, 0, rasterUniformData);
+
+        const rasterBindGroup = device.createBindGroup({
+            layout: cachedRadialRasterizePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: triangleBuffer } },
+                { binding: 1, resource: { buffer: attentionBuffer } },
+                { binding: 2, resource: { buffer: outputBuffer } },
+                { binding: 3, resource: { buffer: rasterUniformBuffer } },
+            ],
+        });
+
+        const rasterEncoder = device.createCommandEncoder();
+        const rasterPass = rasterEncoder.beginComputePass();
+        rasterPass.setPipeline(cachedRadialRasterizePipeline);
+        rasterPass.setBindGroup(0, rasterBindGroup);
+        const workgroupsX = Math.ceil(gridWidth / 16);
+        const workgroupsY = Math.ceil(gridHeight / 16);
+        rasterPass.dispatchWorkgroups(workgroupsX, workgroupsY);
+        rasterPass.end();
+
+        const stagingBuffer = device.createBuffer({
+            size: totalCells * 4,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        rasterEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, totalCells * 4);
+        device.queue.submit([rasterEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+
+        await stagingBuffer.mapAsync(GPUMapMode.READ);
+        const outputData = new Float32Array(stagingBuffer.getMappedRange());
+        const tileResult = new Float32Array(outputData);
+        stagingBuffer.unmap();
+
+        const rasterTime = performance.now() - rasterStartTime;
+        debug.log(`${prefix} Rasterization: ${rasterTime.toFixed(1)}ms`);
+
+        // Cleanup tile buffers
+        attentionBuffer.destroy();
+        cullUniformBuffer.destroy();
+        outputBuffer.destroy();
+        rasterUniformBuffer.destroy();
+        stagingBuffer.destroy();
+
+            return {
+                tileIdx,
+                data: tileResult,
+                gridWidth,
+                gridHeight,
+                minX: tile_min_x,
+                maxX: tile_max_x
+            };
+        } catch (error) {
+            debug.error(`[WebGPU Worker] Error processing tile ${tileIdx + 1}/${numTiles}:`, error);
+            throw new Error(`Tile ${tileIdx + 1} failed: ${error.message}`);
+        }
+    }
+
+    // Process all tiles in parallel with progress tracking
+    debug.log(`[WebGPU Worker] Processing ${numTiles} tiles in parallel...`);
+    let completedTiles = 0;
+    const tilePromises = [];
+
+    for (let tileIdx = 0; tileIdx < numTiles; tileIdx++) {
+        const tilePromise = processTile(tileIdx).then(result => {
+            completedTiles++;
+            const percent = Math.round((completedTiles / numTiles) * 100);
+
+            // Report progress
+            self.postMessage({
+                type: 'rasterize-progress',
+                data: {
+                    percent,
+                    current: completedTiles,
+                    total: numTiles
+                }
+            });
+
+            return result;
+        });
+        tilePromises.push(tilePromise);
+    }
+
+    // Wait for all tiles to complete
+    const tileResultsUnsorted = await Promise.all(tilePromises);
+
+    // Sort by tile index to ensure correct X ordering for stitching
+    const tileResults = tileResultsUnsorted.sort((a, b) => a.tileIdx - b.tileIdx);
+
+    triangleBuffer.destroy();
+
+    const totalTime = performance.now() - startTime;
+    debug.log(`[WebGPU Worker] ✅ Radial complete in ${totalTime.toFixed(1)}ms`);
+
+    // Stitch tiles together into a single dense array
+    const fullGridHeight = Math.ceil(360 / rotationStepDegrees) + 1; // Number of angular samples
+    const fullGridWidth = Math.ceil(xRange / stepSize) + 1;
+    const stitchedData = new Float32Array(fullGridWidth * fullGridHeight);
+    stitchedData.fill(EMPTY_CELL);
+
+    for (const tile of tileResults) {
+        const tileXOffset = Math.round((tile.minX - bounds.min.x) / stepSize);
+
+        for (let ty = 0; ty < tile.gridHeight; ty++) {
+            for (let tx = 0; tx < tile.gridWidth; tx++) {
+                const tileIdx = ty * tile.gridWidth + tx;
+                const fullX = tileXOffset + tx;
+                const fullY = ty;
+
+                if (fullX >= 0 && fullX < fullGridWidth && fullY >= 0 && fullY < fullGridHeight) {
+                    const fullIdx = fullY * fullGridWidth + fullX;
+                    stitchedData[fullIdx] = tile.data[tileIdx];
+                }
+            }
+        }
+    }
+
+    // For toolpath generation, bounds.max.y must match the actual grid dimensions
+    // so that createHeightMapFromPoints calculates the correct height:
+    // height = ceil((max.y - min.y) / stepSize) + 1 = gridHeight
+    // Therefore: max.y = (gridHeight - 1) * stepSize
+    const boundsMaxY = (fullGridHeight - 1) * stepSize;
+
+    return {
+        positions: stitchedData,
+        pointCount: stitchedData.length,
+        bounds: {
+            min: { x: bounds.min.x, y: 0, z: 0 },
+            max: { x: bounds.max.x, y: boundsMaxY, z: maxRadius }
+        },
+        conversionTime: totalTime,
+        gridWidth: fullGridWidth,
+        gridHeight: fullGridHeight,
+        isDense: true,
+        maxRadius,
+        circumference,
+        rotationStepDegrees  // NEW: needed for wrapping and toolpath generation
+    };
+}
+
 // Handle messages from main thread
 self.onmessage = async function(e) {
     const { type, data } = e.data;
@@ -2236,6 +2286,15 @@ self.onmessage = async function(e) {
                     type: 'radial-scanline-complete',
                     data: scanlineResult
                 }, [scanlineResult.scanline.buffer]);
+                break;
+
+            case 'radial-rasterize':
+                const { triangles: radialTriangles, stepSize: radialStep, rotationStep: radialRotationStep, zFloor: radialZFloor = 0, boundsOverride: radialBounds } = data;
+                const radialResult = await radialRasterize(radialTriangles, radialStep, radialRotationStep, radialZFloor, radialBounds);
+                self.postMessage({
+                    type: 'radial-rasterize-complete',
+                    data: radialResult
+                }, [radialResult.positions.buffer]);
                 break;
 
             default:

@@ -3,13 +3,16 @@
   "version": "1.0.0",
   "description": "Terrain and Tool Raster Path Finder using WebGPU",
   "type": "module",
-  "main": "src/index.js",
+  "main": "build/raster-path.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./build/raster-path.js",
+    "./worker": "./build/webgpu-worker.js"
   },
   "files": [
+    "build/**/*",
     "src/**/*.js",
-    "src/web/**/*",
+    "src/**/*.wgsl",
+    "scripts/**/*",
     "README.md",
     "LICENSE"
   ],
@@ -22,21 +25,16 @@
     "url": "https://github.com/gridspace/raster-path/issues"
   },
   "scripts": {
-    "build": "npm run clean && npm run build:web",
-    "build:web": "mkdir -p build && cp src/web/* build/ && cp src/index.js build/raster-path.js",
+    "prepare": "npm run build",
+    "build": "npm run clean && npm run build:web && npm run build:shaders",
+    "build:shaders": "node scripts/build-shaders.js",
+    "build:web": "mkdir -p build && cp src/web/*.html src/web/*.css src/web/*.js build/ && cp src/index.js build/raster-path.js",
     "clean": "rm -rf build/",
     "dev": "npm run build && npm run serve -- -p 9090",
     "serve": "npx serve build",
-    "test": "npm run test:toolpath && npm run test:tiled",
-    "test:regression": "npm run build && electron src/test/regression-test.cjs",
-    "test:toolpath": "npm run build && electron src/test/toolpath-regression.cjs",
-    "test:tiled": "npm run build && electron src/test/toolpath-tiled-test.cjs",
-    "test:radial": "npm run build && electron src/test/radial-toolpath-test.cjs",
-    "test:radial-padding": "npm run build && electron src/test/radial-padding-test.cjs",
-    "test:radial-benchmark": "npm run build && electron src/test/radial-production-benchmark.cjs",
-    "test:planar-vs-radial": "npm run build && electron src/test/planar-vs-radial-test.cjs",
-    "test:batch-rasterize": "npm run build && electron src/test/batch-rasterize-test.cjs",
-    "test:radial-batch": "npm run build && electron src/test/radial-batch-comparison.cjs"
+    "test": "npm run test:planar && npm run test:radial",
+    "test:planar": "npm run build && npx electron src/test/planar-test.cjs",
+    "test:radial": "npm run build && npx electron src/test/radial-test.cjs"
   },
   "keywords": [
     "cnc",

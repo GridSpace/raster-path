@@ -8,14 +8,6 @@
 </head>
 <body>
     <div id="container">
-        <div id="drop-zone" class="drop-zone">
-            <div class="drop-zone-content">
-                <p class="drop-zone-text">Drag & Drop STL file here</p>
-                <p class="drop-zone-subtext">or click to browse</p>
-                <input type="file" id="file-input" accept=".stl" hidden>
-            </div>
-        </div>
-
         <div class="controls">
             <div class="control-group">
                 <h3>Mode</h3>
@@ -31,6 +23,11 @@
 
             <div class="control-group">
                 <h3>Terrain</h3>
+                <div class="tool-file-control">
+                    <label for="terrain-file-input">Terrain STL:</label>
+                    <input type="file" id="terrain-file-input" accept=".stl">
+                    <span id="terrain-filename" class="filename-display">None</span>
+                </div>
                 <div class="step-size-control">
                     <label for="step-size-select">Detail:</label>
                     <select id="step-size-select">
@@ -39,7 +36,7 @@
                         <option value="0.1" selected>0.1mm (High)</option>
                         <option value="0.05">0.05mm (Max)</option>
                     </select>
-                    <button id="recompute-btn" class="recompute-btn" disabled>Recompute</button>
+                    <button id="recompute-btn" class="recompute-btn" disabled>Rasterize</button>
                 </div>
                 <div class="bounds-control">
                     <label>
@@ -99,9 +96,19 @@
                     </div>
                     <div id="progress-text" class="progress-text">0%</div>
                 </div>
-                <div class="visibility-control">
+                <div class="visibility-control" id="terrain-control" style="display: none;">
                     <label>
                         <input type="checkbox" id="show-terrain" checked> <span id="show-terrain-label">Show Terrain</span>
+                    </label>
+                </div>
+                <div class="visibility-control" id="unwrap-control" style="display: none;">
+                    <label>
+                        <input type="checkbox" id="show-unwrapped"> Show Unwrapped (Flat)
+                    </label>
+                </div>
+                <div class="visibility-control">
+                    <label>
+                        <input type="checkbox" id="show-mesh" checked> Show Original Mesh
                     </label>
                 </div>
             </div>
