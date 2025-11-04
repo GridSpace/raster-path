@@ -24,7 +24,6 @@ let toolRasterData = null;
 let toolpathData = null;
 
 let modelMaxZ = 0;  // Track max Z for tool offset
-
 let rasterPath = null;  // RasterPath instance
 
 // Three.js objects
@@ -349,46 +348,14 @@ async function rasterizeAll() {
                 }
                 console.log('Mesh YZ bounds:', meshBounds);
             }
-
-            // Calculate max Z for tool offset
-            const positions = modelRasterData.positions;
-            modelMaxZ = -Infinity;
-            for (let i = 0; i < positions.length; i++) {
-                const z = positions[i];
-                if (z > -1e9 && z > modelMaxZ) {
-                    modelMaxZ = z;
-                }
-            }
         }
 
         // Rasterize tool
         if (toolTriangles) {
-            // Center tool on origin for radial mode
-            let toolTrianglesToRaster = toolTriangles;
-            if (mode === 'radial') {
-                const bounds = calculateTriangleBounds(toolTriangles);
-                const yzCenterY = (bounds.max.y + bounds.min.y) / 2;
-                const yzCenterZ = (bounds.max.z + bounds.min.z) / 2;
-
-                if (Math.abs(yzCenterY) > 0.01 || Math.abs(yzCenterZ) > 0.01) {
-                    console.log(`Centering tool for radial: Y offset=${yzCenterY.toFixed(2)}, Z offset=${yzCenterZ.toFixed(2)}`);
-                    toolTrianglesToRaster = new Float32Array(toolTriangles.length);
-                    for (let i = 0; i < toolTriangles.length; i += 3) {
-                        toolTrianglesToRaster[i] = toolTriangles[i]; // X unchanged
-                        toolTrianglesToRaster[i + 1] = toolTriangles[i + 1] - yzCenterY; // Center Y
-                        toolTrianglesToRaster[i + 2] = toolTriangles[i + 2] - yzCenterZ; // Center Z
-                    }
-                }
-            }
-
-            updateInfo('Rasterizing tool...');
-            const t0 = performance.now();
             toolRasterData = await rasterPath.rasterizeTool({
-                triangles: toolTrianglesToRaster,
+                triangles: toolTriangles,
                 zFloor: zFloor
             });
-            const t1 = performance.now();
-            updateInfo(`Tool rasterized in ${(t1 - t0).toFixed(0)}ms`);
         }
 
         updateInfo('Rasterization complete');
@@ -591,6 +558,7 @@ function displayModelMesh() {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(modelTriangles, 3));
     geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
 
     const material = new THREE.MeshPhongMaterial({
         color: 0x00ffff,
@@ -601,6 +569,12 @@ function displayModelMesh() {
 
     modelMesh = new THREE.Mesh(geometry, material);
     rotatedGroup.add(modelMesh);
+
+    // Calculate max Z for tool offset
+    modelMaxZ = geometry.boundingBox.max.z + 20;
+
+    // update tool position when terrain (re)loaded
+    toolMesh && (toolMesh.position.z = modelMaxZ);  // Offset tool above model
 }
 
 function displayToolMesh() {
@@ -619,7 +593,7 @@ function displayToolMesh() {
     });
 
     toolMesh = new THREE.Mesh(geometry, material);
-    toolMesh.position.z = modelMaxZ + 20;  // Offset tool above model
+    toolMesh.position.z = modelMaxZ;  // Offset tool above model
     rotatedGroup.add(toolMesh);
 }
 
@@ -736,18 +710,16 @@ function displayToolRaster() {
     // Tool raster is always sparse format [gridX, gridY, Z]
     const { positions: rasterPos, bounds } = toolRasterData;
     const stepSize = resolution;
-    const zOffset = modelMaxZ + 20;  // Offset tool above model
 
     for (let i = 0; i < rasterPos.length; i += 3) {
         const gridX = rasterPos[i];
         const gridY = rasterPos[i + 1];
-        const z = rasterPos[i + 2];
-
+        const z = -rasterPos[i + 2];
         const x = bounds.min.x + gridX * stepSize;
         const y = bounds.min.y + gridY * stepSize;
 
-        positions.push(x, y, z + zOffset);
-        colors.push(1, 0.4, 0);  // Orange
+        positions.push(x, y, z);
+        colors.push(1, 0.4, 0);
     }
 
     if (positions.length > 0) {
@@ -757,13 +729,13 @@ function displayToolRaster() {
 
         // Scale point size with resolution for proper spacing
         const pointSize = resolution;
-
         const material = new THREE.PointsMaterial({
             size: pointSize,
             vertexColors: true
         });
 
         toolRasterPoints = new THREE.Points(geometry, material);
+        toolRasterPoints.position.z = modelMaxZ;  // Offset tool above model
         rotatedGroup.add(toolRasterPoints);
     }
 }

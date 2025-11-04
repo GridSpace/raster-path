@@ -38,7 +38,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let tool_center_x = i32(point_idx * uniforms.x_step);
     let tool_center_y = i32(scanline * uniforms.y_step);
 
-    var max_collision_z = -MAX_F32;  // Track maximum collision height
+    // var max_collision_z = -MAX_F32;  // Track maximum collision height
+    var max_collision_z = uniforms.oob_z;  // Track maximum collision height
     var found_collision = false;
 
     for (var i = 0u; i < uniforms.tool_count; i++) {
@@ -59,7 +60,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if (terrain_z > EMPTY_CELL + 1.0) {
             // Tool z_value is positive offset from tip (tip=0, shaft=+50)
             // Subtract from terrain to find where tool center needs to be
-            let collision_z = terrain_z - tool_point.z_value;
+            let collision_z = terrain_z + tool_point.z_value;
             max_collision_z = max(max_collision_z, collision_z);
             found_collision = true;
         }

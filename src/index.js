@@ -5,26 +5,28 @@
  * Configuration options for RasterPath
  * @typedef {Object} RasterPathConfig
  * @property {'planar'|'radial'} mode - Rasterization mode (default: 'planar')
+ * @property {boolean} autoTiling - Automatically tile large datasets (default: true)
+ * @property {number} gpuMemorySafetyMargin - Safety margin as percentage (default: 0.8 = 80%)
+ * @property {number} maxConcurrentTiles - Max concurrent tiles for radial rasterization (default: 50)
+ * @property {number} maxGPUMemoryMB - Maximum GPU memory per tile (default: 256MB)
+ * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
+ * @property {number} radialRotationOffset - Radial mode: rotation offset in degrees (default: 0, use 90 to start at Z-axis)
  * @property {number} resolution - Grid step size in mm (required)
  * @property {number} rotationStep - Radial mode only: degrees between rays (e.g., 1.0 = 360 rays)
- * @property {number} maxGPUMemoryMB - Maximum GPU memory per tile (default: 256MB)
- * @property {number} gpuMemorySafetyMargin - Safety margin as percentage (default: 0.8 = 80%)
- * @property {boolean} autoTiling - Automatically tile large datasets (default: true)
- * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
- * @property {boolean} quiet - Suppress log output (default: false)
- * @property {boolean} debug - Enable debug logging (default: false)
- * @property {number} maxConcurrentTiles - Max concurrent tiles for radial rasterization (default: 50)
  * @property {number} trianglesPerTile - Target triangles per tile for radial rasterization (default: calculated)
- * @property {number} radialRotationOffset - Radial mode: rotation offset in degrees (default: 0, use 90 to start at Z-axis)
+ * @property {boolean} debug - Enable debug logging (default: false)
+ * @property {boolean} quiet - Suppress log output (default: false)
  */
 
 const ZMAX = 10e6;
 const EMPTY_CELL = -1e10;
+const log_pre = '[Raster]';
 
 const debug = {
-    error: console.error,
-    warn: console.warn,
-    log: console.log
+    error: function() { console.error(log_pre, ...arguments) },
+    warn: function() { console.warn(log_pre, ...arguments) },
+    log: function() { console.log(log_pre, ...arguments) },
+    ok: function() { console.log(log_pre, '✅', ...arguments) },
 };
 
 /**
@@ -162,12 +164,15 @@ export class RasterPath {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
-
-        if (this.mode === 'planar') {
-            return this.#rasterizePlanarTool({ triangles, zFloor, boundsOverride });
-        } else {
-            return this.#rasterizeRadialTool({ triangles, zFloor, boundsOverride });
+        const toolData = await this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: true });
+        const { bounds, positions } = toolData;
+        for (let i=0; i<positions.length; i += 3) {
+            positions[i+2] = -positions[i+2] - bounds.min.z;
         }
+        let swapZ = bounds.min.z;
+        bounds.min.z = -bounds.max.z;
+        bounds.max.z = -swapZ;
+        return toolData;
     }
 
     /**
@@ -221,7 +226,6 @@ export class RasterPath {
                     triangles,
                     stepSize: this.resolution,
                     filterMode: isForTool ? 1 : 0,  // 0 = max Z (terrain), 1 = min Z (tool)
-                    isForTool,
                     boundsOverride
                 },
                 'rasterize-complete',
@@ -230,10 +234,6 @@ export class RasterPath {
         });
 
         return data;
-    }
-
-    async #rasterizePlanarTool({ triangles, zFloor, boundsOverride }) {
-        return this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: true });
     }
 
     async #generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress }) {
@@ -313,29 +313,7 @@ export class RasterPath {
         return data;
     }
 
-    async #rasterizeRadialTool({ triangles, zFloor, boundsOverride }) {
-        // 1. Rasterize tool as planar (standard tool raster)
-        const planarToolData = await this.#rasterizePlanar({
-            triangles,
-            zFloor,
-            boundsOverride,
-            isForTool: true
-        });
-
-        // 2. Apply hemispherical morphing for cylindrical surface
-        // Note: This assumes terrainData has already been rasterized and has circumference/maxRadius
-        // We'll defer morphing until generateToolpaths where we have terrainData
-        // For now, just return the planar tool data
-        return planarToolData;
-    }
-
     async #generateToolpathsRadial({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset, onProgress }) {
-        // 1. Morph tool for cylindrical surface
-        const morphedTool = this.#morphTool(toolData, terrainData, radiusOffset);
-
-        // 2. Stitch radial tiles into dense array for planar toolpath processing
-        const { terrainPositions, bounds } = this.#prepareTerrainForToolpath(terrainData);
-
         // 3. Generate toolpaths using planar algorithm
         return new Promise((resolve, reject) => {
             // Set up progress handler if callback provided
@@ -373,149 +351,6 @@ export class RasterPath {
                 handler
             );
         });
-    }
-
-    /**
-     * Morph planar tool to cylindrical surface with hemispherical compensation
-     * @private
-     */
-    #morphTool(planarToolData, terrainData, radiusOffset = 20) {
-        const { positions, bounds, pointCount } = planarToolData;
-        const { circumference, maxRadius } = terrainData;
-
-        debug.log('[RasterPath] Morphing tool for cylindrical surface:', {
-            pointCount,
-            circumference,
-            maxRadius,
-            radiusOffset,
-            toolBounds: bounds
-        });
-
-        // Find tool center and radius for hemispherical morphing
-        const toolCenterX = (bounds.max.x + bounds.min.x) / 2;
-        const toolCenterY = (bounds.max.y + bounds.min.y) / 2;
-        const toolRadiusX = (bounds.max.x - bounds.min.x) / 2;
-        const toolRadiusY = (bounds.max.y - bounds.min.y) / 2;
-        const toolRadius = Math.max(toolRadiusX, toolRadiusY);
-
-        // Modify Z values IN PLACE to apply hemispherical compensation
-        for (let i = 0; i < positions.length; i += 3) {
-            const gridX = positions[i];     // Grid index X (unchanged)
-            const gridY = positions[i + 1]; // Grid index Y (unchanged)
-            const z = positions[i + 2];     // Tool Z value (will be modified)
-
-            // Convert grid indices to world coordinates to calculate distance from center
-            const wx = bounds.min.x + gridX * this.resolution;
-            const wy = bounds.min.y + gridY * this.resolution;
-
-            // Calculate normalized distance from tool center
-            const dx = wx - toolCenterX;
-            const dy = wy - toolCenterY;
-            const distFromCenter = Math.sqrt(dx * dx + dy * dy);
-            const normalizedDist = Math.min(distFromCenter / toolRadius, 1.0);
-
-            // Apply hemispherical morphing (0 at center, increases to toolRadius at edges)
-            const hemisphereZ = toolRadius * (1 - Math.sqrt(1 - normalizedDist * normalizedDist));
-
-            // Add hemisphereZ to create hemisphere shape
-            positions[i + 2] = z + hemisphereZ;
-        }
-
-        // Return the same data object (positions modified in place)
-        return planarToolData;
-    }
-
-    /**
-     * Prepare radial terrain for toolpath generation
-     * Handles both tiled and non-tiled radial data
-     * @private
-     */
-    #prepareTerrainForToolpath(terrainData) {
-        // If already a dense array (non-tiled), return as-is
-        if (terrainData.isDense && terrainData.positions) {
-            debug.log('[RasterPath] Using dense radial terrain:', terrainData.gridWidth, 'x', terrainData.gridHeight);
-            return {
-                terrainPositions: terrainData.positions,
-                bounds: terrainData.bounds
-            };
-        }
-
-        // Otherwise, stitch tiles
-        const tiles = terrainData.tiles;
-        const gridHeight = tiles[0].gridHeight; // All tiles have same height (circumference)
-        const stepSize = this.resolution;
-
-        // Find global X range from tiles (in original STL coordinates)
-        let globalMinX = Infinity;
-        let globalMaxX = -Infinity;
-        for (const tile of tiles) {
-            globalMinX = Math.min(globalMinX, tile.minX);
-            globalMaxX = Math.max(globalMaxX, tile.maxX);
-        }
-
-        // Calculate total grid width
-        const totalGridWidth = Math.ceil((globalMaxX - globalMinX) / stepSize) + 1;
-
-        debug.log('[RasterPath] Stitching', tiles.length, 'tiles into', totalGridWidth, 'x', gridHeight, 'dense array');
-        debug.log('[RasterPath] Global X range:', globalMinX, 'to', globalMaxX);
-
-        // Create single dense array (row-major: Y * width + X)
-        const terrainPositions = new Float32Array(totalGridWidth * gridHeight);
-        terrainPositions.fill(EMPTY_CELL);
-
-        for (let tileIdx = 0; tileIdx < tiles.length; tileIdx++) {
-            const tile = tiles[tileIdx];
-            const tileGridWidth = tile.gridWidth;
-            const tileGridHeight = tile.gridHeight;
-
-            // Calculate this tile's offset in the global grid
-            const tileStartGridX = Math.round((tile.minX - globalMinX) / stepSize);
-
-            debug.log(`[RasterPath] Tile ${tileIdx}: minX=${tile.minX}, gridWidth=${tileGridWidth}, startGridX=${tileStartGridX}`);
-
-            for (let gy = 0; gy < tileGridHeight; gy++) {
-                for (let gx = 0; gx < tileGridWidth; gx++) {
-                    const localTileIdx = gy * tileGridWidth + gx;
-                    const globalGx = tileStartGridX + gx;
-                    const globalIdx = gy * totalGridWidth + globalGx;
-
-                    if (globalGx < 0 || globalGx >= totalGridWidth) {
-                        debug.warn(`[RasterPath] OUT OF BOUNDS! tile ${tileIdx}, gx=${gx}, globalGx=${globalGx}, totalGridWidth=${totalGridWidth}`);
-                        continue;
-                    }
-
-                    terrainPositions[globalIdx] = tile.data[localTileIdx];
-                }
-            }
-        }
-
-        // Count empty cells for diagnostics
-        let emptyCells = 0;
-        for (let i = 0; i < terrainPositions.length; i++) {
-            if (terrainPositions[i] <= -1e9) emptyCells++;
-        }
-        debug.log('[RasterPath] Stitched terrain:', terrainPositions.length, 'cells,', emptyCells, 'empty (', (emptyCells / terrainPositions.length * 100).toFixed(1), '%)');
-
-        // Create bounds using original STL X coordinates
-        const bounds = {
-            min: {
-                x: globalMinX,  // Original STL X min
-                y: 0,           // Angle starts at 0
-                z: terrainData.bounds.min.z
-            },
-            max: {
-                x: globalMaxX,              // Original STL X max
-                y: terrainData.circumference,  // Full circumference
-                z: terrainData.bounds.max.z
-            }
-        };
-
-        debug.log('[RasterPath] Bounds:', bounds);
-
-        return {
-            terrainPositions,
-            bounds
-        };
     }
 
     // ============================================================================
