@@ -90,8 +90,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let sinTheta = sin(theta);
     let rayOrigin = vec3f(wx, 0.0, 0.0);
 
-    // Ray direction: point outward radially in YZ plane
-    let rayDirOut = vec3f(0.0, cosTheta, sinTheta);
+    // Ray direction: point outward radially in YZ plane (negate sinTheta for clockwise from +Y)
+    let rayDirOut = vec3f(0.0, cosTheta, -sinTheta);
 
     // Find FARTHEST intersection in outward direction (positive distances)
     var bestRadius = -1e10;  // Start with very negative (worst case)
@@ -125,8 +125,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Also check inward direction (for lathe ops through center)
     // These will have negative conceptual distances (inside the axis)
-    let rayDirIn = vec3f(0.0, -cosTheta, -sinTheta);
+    let rayDirIn = vec3f(0.0, -cosTheta, sinTheta);
 
+    if (foundHit == false) {
     for (var compactIdx = 0u; compactIdx < uniforms.num_triangles; compactIdx++) {
         // Get actual triangle index from compact list
         let triIdx = compactTriangleIndices[compactIdx];
@@ -151,6 +152,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 foundHit = true;
             }
         }
+    }
     }
 
     // Calculate output
