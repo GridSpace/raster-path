@@ -847,7 +847,9 @@ function createSparseToolFromPoints(points) {
         // Calculate offset from tool center (pure integer arithmetic)
         const xOffset = gridX - centerX;
         const yOffset = gridY - centerY;
-        const zValue = z - minZ; // Z relative to tool tip
+        // Z relative to tool tip: tip=0, points above tip are positive
+        // minZ is the lowest Z (tip), so z - minZ gives positive offsets upward
+        const zValue = z - minZ;
 
         xOffsets.push(xOffset);
         yOffsets.push(yOffset);

@@ -38,7 +38,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let tool_center_x = i32(point_idx * uniforms.x_step);
     let tool_center_y = i32(scanline * uniforms.y_step);
 
-    var min_delta = MAX_F32;
+    var max_collision_z = -MAX_F32;  // Track maximum collision height
+    var found_collision = false;
 
     for (var i = 0u; i < uniforms.tool_count; i++) {
         let tool_point = sparse_tool[i];
@@ -56,14 +57,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Check if terrain cell has geometry (not empty sentinel value)
         if (terrain_z > EMPTY_CELL + 1.0) {
-            let delta = tool_point.z_value - terrain_z;
-            min_delta = min(min_delta, delta);
+            // Tool z_value is positive offset from tip (tip=0, shaft=+50)
+            // Subtract from terrain to find where tool center needs to be
+            let collision_z = terrain_z - tool_point.z_value;
+            max_collision_z = max(max_collision_z, collision_z);
+            found_collision = true;
         }
     }
 
     var output_z = uniforms.oob_z;
-    if (min_delta < MAX_F32) {
-        output_z = -min_delta;
+    if (found_collision) {
+        output_z = max_collision_z;
     }
 
     let output_idx = scanline * uniforms.points_per_line + point_idx;
