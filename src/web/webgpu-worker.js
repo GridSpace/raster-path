@@ -2246,9 +2246,17 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
             }
         }
 
-        // Debug first strip
-        if (angleIdx === 0) {
-            debug.log(`[Worker] Strip 0: minZ=${minZ.toFixed(3)}, maxZ=${maxZ.toFixed(3)}, zFloor=${zFloor}, valid=${validCount}/${gridWidth * gridYHeight}`);
+        // Debug sample strips to check X coverage and angle symmetry
+        if (angleIdx === 0 || angleIdx === 90 || angleIdx === 180 || angleIdx === 270) {
+            // Sample X positions from start, middle, end to check coverage
+            const samples = [];
+            const sampleX = [0, Math.floor(gridWidth/4), Math.floor(gridWidth/2), Math.floor(3*gridWidth/4), gridWidth-1];
+            for (const x of sampleX) {
+                const z = stripData[x]; // First Y row
+                samples.push(`x${x}=${z.toFixed(2)}`);
+            }
+            debug.log(`[Worker] Strip ${angleIdx} (${(angleIdx * angleStep).toFixed(1)}°): minZ=${minZ.toFixed(3)}, maxZ=${maxZ.toFixed(3)}, valid=${validCount}/${gridWidth * gridYHeight}`);
+            debug.log(`[Worker]   X samples: ${samples.join(', ')}`);
         }
 
         strips.push({
@@ -2417,7 +2425,7 @@ self.onmessage = async function(e) {
 
                     // Skip empty strips (no terrain points)
                     if (!strip.positions || strip.positions.length === 0) {
-                        debug.log(`[Worker] Strip ${i} (${strip.angle.toFixed(1)}°): EMPTY, skipping`);
+                        // Don't log every empty strip - too verbose
                         continue;
                     }
 
@@ -2442,7 +2450,10 @@ self.onmessage = async function(e) {
 
                     totalToolpathPoints += stripToolpathResult.pathData.length;
 
-                    debug.log(`[Worker] Strip ${i} (${strip.angle.toFixed(1)}°): ${stripToolpathResult.pathData.length} toolpath points`);
+                    // Only log first, middle, last strips to reduce spam
+                    if (i < 3 || i === Math.floor(radialModelResult.strips.length / 2) || i >= radialModelResult.strips.length - 3) {
+                        debug.log(`[Worker] Strip ${i} (${strip.angle.toFixed(1)}°): ${stripToolpathResult.pathData.length} toolpath points`);
+                    }
                 }
 
                 debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points`);
