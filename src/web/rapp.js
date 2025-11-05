@@ -400,6 +400,30 @@ async function generateToolpath() {
             if (toolpathData.terrainStrips) {
                 modelRasterData = toolpathData.terrainStrips;
                 console.log('[Radial] Terrain strips available:', modelRasterData.length, 'strips');
+
+                // DEBUG: Check X range in strips
+                if (modelRasterData.length > 0) {
+                    const strip0 = modelRasterData[0];
+                    console.log('[Radial] Strip 0 structure:', {
+                        angle: strip0.angle,
+                        pointCount: strip0.pointCount,
+                        positionsLength: strip0.positions?.length,
+                        gridWidth: strip0.gridWidth,
+                        gridHeight: strip0.gridHeight,
+                        bounds: strip0.bounds
+                    });
+
+                    // Find actual X range in positions
+                    if (strip0.positions && strip0.positions.length > 0) {
+                        let minX = Infinity, maxX = -Infinity;
+                        for (let i = 0; i < strip0.positions.length; i += 3) {
+                            const x = strip0.positions[i];
+                            minX = Math.min(minX, x);
+                            maxX = Math.max(maxX, x);
+                        }
+                        console.log('[Radial] Strip 0 actual X range in positions:', minX.toFixed(2), 'to', maxX.toFixed(2));
+                    }
+                }
             }
             // This is fine - we only need toolpathData for visualization
         }
@@ -643,6 +667,12 @@ function displayModelRaster(wrapped) {
 
         if (wrapped) {
             // Wrap each strip around X-axis at its angle
+            console.log('[Display] Wrapping', modelRasterData.length, 'strips');
+
+            // Track overall X range for debug
+            let overallMinX = Infinity, overallMaxX = -Infinity;
+            let totalPointsRendered = 0;
+
             for (const strip of modelRasterData) {
                 const { angle, positions: stripPositions } = strip;
 
@@ -658,14 +688,21 @@ function displayModelRaster(wrapped) {
                     const y_planar = stripPositions[i + 1];  // Y in planar coordinates
                     const terrainHeight = stripPositions[i + 2];  // Distance from X-axis
 
+                    overallMinX = Math.min(overallMinX, x);
+                    overallMaxX = Math.max(overallMaxX, x);
+
                     // Wrap: use terrainHeight as radial distance from X-axis
                     const y = terrainHeight * cosTheta;
                     const z = terrainHeight * sinTheta;
 
                     positions.push(x, y, z);
                     colors.push(0, 1, 0);  // Green
+                    totalPointsRendered++;
                 }
             }
+
+            console.log('[Display] Rendered', totalPointsRendered, 'points');
+            console.log('[Display] X range: [' + overallMinX.toFixed(2) + ', ' + overallMaxX.toFixed(2) + ']');
         } else {
             // Show unwrapped (planar) - lay out strips side by side
             for (let stripIdx = 0; stripIdx < modelRasterData.length; stripIdx++) {

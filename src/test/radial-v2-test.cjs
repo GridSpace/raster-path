@@ -163,6 +163,16 @@ function createWindow() {
                     console.log('    Strip ' + i + ' (' + strip.angle.toFixed(1) + '°): ' + strip.pointCount + ' points');
 
                     if (strip.pointCount > 0) {
+                        // Find X range in this strip
+                        let stripMinX = Infinity, stripMaxX = -Infinity;
+                        for (let j = 0; j < strip.positions.length; j += 3) {
+                            const x = strip.positions[j];
+                            stripMinX = Math.min(stripMinX, x);
+                            stripMaxX = Math.max(stripMaxX, x);
+                        }
+                        const xRange = stripMaxX - stripMinX;
+                        console.log('      X range: [' + stripMinX.toFixed(2) + ', ' + stripMaxX.toFixed(2) + '] = ' + xRange.toFixed(2) + ' mm');
+
                         // Sample some Z values
                         const sampleSize = Math.min(5, strip.pointCount);
                         const samples = [];
