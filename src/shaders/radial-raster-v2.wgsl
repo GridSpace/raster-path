@@ -31,21 +31,9 @@ struct BucketInfo {
 @group(0) @binding(3) var<storage, read> bucket_info: array<BucketInfo>;
 @group(0) @binding(4) var<storage, read> triangle_indices: array<u32>;
 
-// Fast 2D bounding box check for ray-triangle intersection
-fn ray_hits_triangle_bbox(ray_origin: vec3<f32>, ray_dir: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> bool {
-    let epsilon = 0.001;  // 1 micron tolerance
-    let min_x = min(min(v0.x, v1.x), v2.x) - epsilon;
-    let max_x = max(max(v0.x, v1.x), v2.x) + epsilon;
-    let min_y = min(min(v0.y, v1.y), v2.y) - epsilon;
-    let max_y = max(max(v0.y, v1.y), v2.y) + epsilon;
-    let min_z = min(min(v0.z, v1.z), v2.z) - epsilon;
-    let max_z = max(max(v0.z, v1.z), v2.z) + epsilon;
-
-    // Simple AABB check
-    return ray_origin.x >= min_x && ray_origin.x <= max_x &&
-           ray_origin.y >= min_y && ray_origin.y <= max_y &&
-           ray_origin.z >= min_z && ray_origin.z <= max_z;
-}
+// Note: AABB early rejection removed - X-bucketing already provides spatial filtering
+// A proper ray-AABB intersection test would be needed if we wanted bounding box culling,
+// but checking if ray_origin is inside AABB was incorrect and rejected valid triangles
 
 // Ray-triangle intersection using Möller-Trumbore algorithm
 fn ray_triangle_intersect(
@@ -56,11 +44,6 @@ fn ray_triangle_intersect(
     v2: vec3<f32>
 ) -> vec2<f32> {  // Returns (hit: 0.0 or 1.0, z: intersection_z)
     let EPSILON = 0.0001;
-
-    // Early rejection using bounding box
-    if (!ray_hits_triangle_bbox(ray_origin, ray_dir, v0, v1, v2)) {
-        return vec2<f32>(0.0, 0.0);
-    }
 
     // Calculate edges
     let edge1 = v1 - v0;

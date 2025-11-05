@@ -1956,7 +1956,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     // Calculate grid dimensions
     const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / resolution);
     const gridYHeight = Math.ceil(toolWidth / resolution);
-    const bucketGridWidth = Math.ceil(bucketData.buckets[0].maxX - bucketData.buckets[0].minX) / resolution;
+    const bucketGridWidth = Math.ceil((bucketData.buckets[0].maxX - bucketData.buckets[0].minX) / resolution);
 
     debug.log('[Worker] Radial V2 rasterization:', {
         gridWidth,
@@ -1965,8 +1965,23 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         numBuckets: bucketData.numBuckets,
         bucketGridWidth,
         maxRadius,
-        toolWidth
+        toolWidth,
+        resolution,
+        angleStepDeg: angleStep,
+        boundsMinX: bounds.min.x,
+        boundsMaxX: bounds.max.x,
+        zFloor
     });
+
+    // Debug first bucket
+    if (bucketData.buckets.length > 0) {
+        debug.log('[Worker] First bucket:', {
+            minX: bucketData.buckets[0].minX,
+            maxX: bucketData.buckets[0].maxX,
+            startIndex: bucketData.buckets[0].startIndex,
+            count: bucketData.buckets[0].count
+        });
+    }
 
     // Create GPU buffers
     const triangleBuffer = device.createBuffer({
@@ -1977,22 +1992,28 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     new Float32Array(triangleBuffer.getMappedRange()).set(triangles);
     triangleBuffer.unmap();
 
-    // Create bucket info buffer
-    const bucketInfoData = new Float32Array(bucketData.buckets.length * 4);
-    for (let i = 0; i < bucketData.buckets.length; i++) {
-        const bucket = bucketData.buckets[i];
-        bucketInfoData[i * 4] = bucket.minX;
-        bucketInfoData[i * 4 + 1] = bucket.maxX;
-        bucketInfoData[i * 4 + 2] = bucket.startIndex;
-        bucketInfoData[i * 4 + 3] = bucket.count;
-    }
-
+    // Create bucket info buffer (f32, f32, u32, u32 per bucket)
+    const bucketInfoSize = bucketData.buckets.length * 16; // 4 fields * 4 bytes
     const bucketInfoBuffer = device.createBuffer({
-        size: bucketInfoData.byteLength,
+        size: bucketInfoSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true
     });
-    new Float32Array(bucketInfoBuffer.getMappedRange()).set(bucketInfoData);
+
+    const bucketView = new ArrayBuffer(bucketInfoSize);
+    const bucketFloatView = new Float32Array(bucketView);
+    const bucketUintView = new Uint32Array(bucketView);
+
+    for (let i = 0; i < bucketData.buckets.length; i++) {
+        const bucket = bucketData.buckets[i];
+        const offset = i * 4;
+        bucketFloatView[offset] = bucket.minX;           // f32
+        bucketFloatView[offset + 1] = bucket.maxX;       // f32
+        bucketUintView[offset + 2] = bucket.startIndex;  // u32
+        bucketUintView[offset + 3] = bucket.count;       // u32
+    }
+
+    new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
     bucketInfoBuffer.unmap();
 
     // Create triangle indices buffer
@@ -2011,28 +2032,32 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
     });
 
-    // Create uniforms
-    const uniformData = new Float32Array([
-        resolution,
-        angleStep * (Math.PI / 180),  // Convert to radians
-        numAngles,
-        maxRadius,
-        toolWidth,
-        gridYHeight,
-        bucketData.buckets[0].maxX - bucketData.buckets[0].minX,  // bucketWidth
-        bucketGridWidth,
-        bounds.min.x,
-        zFloor,
-        0,  // filterMode (0 = terrain)
-        bucketData.numBuckets
-    ]);
-
+    // Create uniforms with proper alignment (f32 and u32 mixed)
+    // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32
     const uniformBuffer = device.createBuffer({
-        size: uniformData.byteLength,
+        size: 48,  // 12 fields * 4 bytes
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true
     });
-    new Float32Array(uniformBuffer.getMappedRange()).set(uniformData);
+
+    const uniformView = new ArrayBuffer(48);
+    const floatView = new Float32Array(uniformView);
+    const uintView = new Uint32Array(uniformView);
+
+    floatView[0] = resolution;                                          // f32
+    floatView[1] = angleStep * (Math.PI / 180);                        // f32
+    uintView[2] = numAngles;                                            // u32
+    floatView[3] = maxRadius;                                           // f32
+    floatView[4] = toolWidth;                                           // f32
+    uintView[5] = gridYHeight;                                          // u32
+    floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;  // f32 bucketWidth
+    uintView[7] = bucketGridWidth;                                      // u32
+    floatView[8] = bounds.min.x;                                        // f32 global_min_x
+    floatView[9] = zFloor;                                              // f32
+    uintView[10] = 0;                                                   // u32 filterMode
+    uintView[11] = bucketData.numBuckets;                               // u32
+
+    new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
     uniformBuffer.unmap();
 
     // Create shader and pipeline
@@ -2125,13 +2150,21 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
 
         // Convert to sparse format [gridX, gridY, Z, ...]
         const sparsePositions = [];
+        let minZ = Infinity, maxZ = -Infinity;
         for (let y = 0; y < gridYHeight; y++) {
             for (let x = 0; x < gridWidth; x++) {
                 const z = stripData[y * gridWidth + x];
+                minZ = Math.min(minZ, z);
+                maxZ = Math.max(maxZ, z);
                 if (z > zFloor + 0.001) {  // Valid data
                     sparsePositions.push(x, y, z);
                 }
             }
+        }
+
+        // Debug first strip
+        if (angleIdx === 0) {
+            debug.log(`[Worker] Strip 0: minZ=${minZ.toFixed(3)}, maxZ=${maxZ.toFixed(3)}, zFloor=${zFloor}, valid=${sparsePositions.length / 3}/${gridWidth * gridYHeight}`);
         }
 
         strips.push({

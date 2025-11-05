@@ -21,7 +21,7 @@ const WORKER_DEST = path.join(BUILD_DIR, 'webgpu-worker.js');
 let workerCode = fs.readFileSync(WORKER_SRC, 'utf8');
 
 // Find all shader placeholders
-const shaderRegex = /\/\*SHADER:([a-z-]+)\*\//g;
+const shaderRegex = /\/\*SHADER:([a-z0-9-]+)\*\//g;
 let match;
 const replacements = [];
 

@@ -34,7 +34,8 @@
     "serve": "npx serve build",
     "test": "npm run test:planar && npm run test:radial",
     "test:planar": "npm run build && npx electron src/test/planar-test.cjs",
-    "test:radial": "npm run build && npx electron src/test/radial-test.cjs"
+    "test:radial": "npm run build && npx electron src/test/radial-test.cjs",
+    "test:radial-v2": "npm run build && npx electron src/test/radial-v2-test.cjs"
   },
   "keywords": [
     "cnc",
