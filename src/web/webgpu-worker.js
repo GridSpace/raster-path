@@ -345,6 +345,9 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     });
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
+    // CRITICAL: Wait for all writeBuffer operations to complete before compute dispatch
+    await device.queue.onSubmittedWorkDone();
+
     // Use cached pipeline
     const bindGroup = device.createBindGroup({
         layout: cachedRasterizePipeline.getBindGroupLayout(0),
@@ -963,6 +966,9 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     });
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
+    // CRITICAL: Wait for all writeBuffer operations to complete before compute dispatch
+    await device.queue.onSubmittedWorkDone();
+
     // Use cached pipeline
     const bindGroup = device.createBindGroup({
         layout: cachedToolpathPipeline.getBindGroupLayout(0),
@@ -1118,6 +1124,10 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
     const uniformDataFloat = new Float32Array(uniformData.buffer);
     uniformDataFloat[5] = oobZ;
     device.queue.writeBuffer(buffers.uniformBuffer, 0, uniformData);
+
+    // CRITICAL: Wait for all writeBuffer operations to complete before compute dispatch
+    // Without this, compute shader may read stale/incomplete buffer data
+    await device.queue.onSubmittedWorkDone();
 
     // Create bind group (reusing cached pipeline)
     const bindGroup = device.createBindGroup({
@@ -1699,6 +1709,9 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
         });
         device.queue.writeBuffer(cullUniformBuffer, 0, cullUniformData);
 
+        // CRITICAL: Wait for writeBuffer operations before compute dispatch
+        await device.queue.onSubmittedWorkDone();
+
         const cullBindGroup = device.createBindGroup({
             layout: cachedRadialCullPipeline.getBindGroupLayout(0),
             entries: [
@@ -1805,6 +1818,9 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         device.queue.writeBuffer(rasterUniformBuffer, 0, rasterUniformData);
+
+        // CRITICAL: Wait for writeBuffer operations before compute dispatch
+        await device.queue.onSubmittedWorkDone();
 
         const rasterBindGroup = device.createBindGroup({
             layout: cachedRadialRasterizePipeline.getBindGroupLayout(0),
@@ -2057,6 +2073,9 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const initData = new Float32Array(outputSize / 4);
     initData.fill(zFloor);
     device.queue.writeBuffer(outputBuffer, 0, initData);
+
+    // CRITICAL: Wait for buffer initialization to complete before compute dispatch
+    await device.queue.onSubmittedWorkDone();
 
     // Create uniforms with proper alignment (f32 and u32 mixed)
     // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32
