@@ -349,7 +349,7 @@ export class RasterPath {
     }
 
     /**
-     * Radial mode: Generate toolpaths from strips
+     * Radial mode: Generate toolpaths from strips (DEPRECATED - use rasterizeAndGenerateToolpathsRadial)
      * @param {object} params - Parameters
      * @param {Array} params.strips - Output from rasterizeModelRadial()
      * @param {object} params.toolData - Output from rasterizeTool()
@@ -412,6 +412,91 @@ export class RasterPath {
             totalPoints,
             numStrips: strips.length
         };
+    }
+
+    /**
+     * Radial mode: Complete pipeline - rasterize model + generate toolpaths (ALL IN WORKER)
+     * This is more efficient than separate calls as it avoids transferring intermediate strip data
+     * @param {object} params - Parameters
+     * @param {Float32Array} params.triangles - Model triangles
+     * @param {object} params.toolData - Output from rasterizeTool()
+     * @param {number} params.xStep - X-axis step size in grid points
+     * @param {number} params.yStep - Y-axis step size in grid points
+     * @param {number} params.zFloor - Z floor value for out-of-bounds
+     * @param {function} params.onProgress - Optional progress callback (current, total) => {}
+     * @returns {Promise<object>} Toolpath data { strips: [{angle, pathData, ...}, ...], totalPoints, numStrips }
+     */
+    async rasterizeAndGenerateToolpathsRadial({ triangles, toolData, xStep, yStep, zFloor, onProgress }) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+        if (this.mode !== 'radial') {
+            throw new Error('rasterizeAndGenerateToolpathsRadial() only works in radial mode');
+        }
+
+        // Calculate bounds
+        const bounds = this.#calculateBounds(triangles);
+        const centerY = (bounds.min.y + bounds.max.y) / 2;
+        const centerZ = (bounds.min.z + bounds.max.z) / 2;
+        const maxRadius = Math.sqrt(
+            Math.max(
+                (bounds.max.y - centerY) ** 2 + (bounds.max.z - centerZ) ** 2,
+                (bounds.min.y - centerY) ** 2 + (bounds.min.z - centerZ) ** 2
+            )
+        );
+
+        // Calculate tool width for radial strips
+        const toolBounds = toolData.bounds;
+        const toolWidth = Math.max(
+            Math.abs(toolBounds.max.y - toolBounds.min.y),
+            Math.abs(toolBounds.max.x - toolBounds.min.x)
+        ) * this.resolution;
+
+        // Build X-bucketing data
+        const numAngles = Math.ceil(360 / this.rotationStep);
+        const bucketWidth = 2.0; // mm - tune this for performance
+        const bucketData = this.#bucketTrianglesByX(triangles, bounds, bucketWidth);
+
+        return new Promise((resolve, reject) => {
+            // Setup progress handler
+            if (onProgress) {
+                const progressHandler = (data) => {
+                    onProgress(data.current, data.total);
+                };
+                this.messageHandlers.set('toolpath-progress', progressHandler);
+            }
+
+            // Setup completion handler
+            const completionHandler = (data) => {
+                // Clean up progress handler
+                if (onProgress) {
+                    this.messageHandlers.delete('toolpath-progress');
+                }
+                resolve(data);
+            };
+
+            // Send entire pipeline to worker
+            this.#sendMessage(
+                'radial-generate-toolpaths',
+                {
+                    triangles,
+                    bucketData,
+                    toolData,
+                    resolution: this.resolution,
+                    angleStep: this.rotationStep,
+                    numAngles,
+                    maxRadius: maxRadius * 1.01,
+                    toolWidth,
+                    zFloor: zFloor ?? 0,
+                    bounds,
+                    xStep,
+                    yStep,
+                    gridStep: this.resolution
+                },
+                'radial-toolpaths-complete',
+                completionHandler
+            );
+        });
     }
 
     // ============================================================================

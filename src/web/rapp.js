@@ -377,52 +377,40 @@ async function generateToolpath() {
             const numPoints = toolpathData.pathData.length;
             updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
         } else {
-            // Radial mode: Rasterize model first, then generate toolpath
+            // Radial mode: Complete pipeline in worker (rasterize + generate toolpath)
 
             // Center mesh on origin for radial mode
-            let trianglesToRaster = modelTriangles;
+            let trianglesToProcess = modelTriangles;
             const bounds = calculateTriangleBounds(modelTriangles);
             const yzCenterY = (bounds.max.y + bounds.min.y) / 2;
             const yzCenterZ = (bounds.max.z + bounds.min.z) / 2;
 
             if (Math.abs(yzCenterY) > 0.01 || Math.abs(yzCenterZ) > 0.01) {
                 console.log(`Centering model for radial: Y offset=${yzCenterY.toFixed(2)}, Z offset=${yzCenterZ.toFixed(2)}`);
-                trianglesToRaster = new Float32Array(modelTriangles.length);
+                trianglesToProcess = new Float32Array(modelTriangles.length);
                 for (let i = 0; i < modelTriangles.length; i += 3) {
-                    trianglesToRaster[i] = modelTriangles[i]; // X unchanged
-                    trianglesToRaster[i + 1] = modelTriangles[i + 1] - yzCenterY; // Center Y
-                    trianglesToRaster[i + 2] = modelTriangles[i + 2] - yzCenterZ; // Center Z
+                    trianglesToProcess[i] = modelTriangles[i]; // X unchanged
+                    trianglesToProcess[i + 1] = modelTriangles[i + 1] - yzCenterY; // Center Y
+                    trianglesToProcess[i + 2] = modelTriangles[i + 2] - yzCenterZ; // Center Z
                 }
             }
 
-            // Rasterize model (returns array of strips)
-            updateInfo('Rasterizing model (radial v2)...');
-            const t1 = performance.now();
-            modelRasterData = await rasterPath.rasterizeModelRadial({
-                triangles: trianglesToRaster,
-                toolData: toolRasterData,
-                zFloor: zFloor
-            });
-            const t2 = performance.now();
-            console.log('Radial V2 strips:', {
-                numStrips: modelRasterData.length,
-                firstStrip: modelRasterData[0],
-                totalPoints: modelRasterData.reduce((sum, s) => sum + s.pointCount, 0)
-            });
-
-            // Generate toolpath from strips
-            updateInfo('Generating toolpath...');
-            toolpathData = await rasterPath.generateToolpathsRadial({
-                strips: modelRasterData,
+            // Complete pipeline in worker (more efficient, avoids race conditions)
+            updateInfo('Processing radial toolpath (rasterize + generate)...');
+            toolpathData = await rasterPath.rasterizeAndGenerateToolpathsRadial({
+                triangles: trianglesToProcess,
                 toolData: toolRasterData,
                 xStep: xStep,
                 yStep: yStep,
                 zFloor: zFloor
             });
 
-            const t3 = performance.now();
+            const t1 = performance.now();
             console.log('Radial toolpaths generated:', toolpathData);
-            updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t3 - t0).toFixed(0)}ms (raster: ${(t2-t1).toFixed(0)}ms, toolpath: ${(t3-t2).toFixed(0)}ms)`);
+            updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+
+            // Note: modelRasterData is not set since we skip that intermediate step
+            // This is fine - we only need toolpathData for visualization
         }
 
         // Auto-enable toolpath view
@@ -804,7 +792,8 @@ function displayToolpaths(wrapped) {
         console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips');
         if (strips.length > 0) {
             const firstStrip = strips[0];
-            const terrainStrip = modelRasterData.find(s => s.angle === firstStrip.angle);
+            // Note: modelRasterData may be null with new pipeline (rasterize + toolpath in one step)
+            const terrainStrip = modelRasterData ? modelRasterData.find(s => s.angle === firstStrip.angle) : null;
 
             // Find min/max without stack overflow
             let minVal = Infinity, maxVal = -Infinity;
@@ -859,8 +848,8 @@ function displayToolpaths(wrapped) {
             // Show unwrapped (not very useful for radial, but supported)
             for (const strip of strips) {
                 const { angle, pathData, numScanlines, pointsPerLine } = strip;
-                // Get bounds from the strip's terrain data
-                const stripBounds = modelRasterData.find(s => s.angle === angle)?.bounds ||
+                // Get bounds from the strip's terrain data (or use default if not available)
+                const stripBounds = (modelRasterData && modelRasterData.find(s => s.angle === angle)?.bounds) ||
                                   { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
                 const yOffset = angle; // Use angle as Y offset for visualization
 

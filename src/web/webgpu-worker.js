@@ -1167,6 +1167,15 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
 
     const endTime = performance.now();
 
+    // Debug: Log first few Z values to detect non-determinism
+    if (result.length > 0) {
+        const samples = [];
+        for (let i = 0; i < Math.min(10, result.length); i++) {
+            samples.push(result[i].toFixed(3));
+        }
+        debug.log(`[Toolpath] Output samples (${result.length} total): ${samples.join(', ')}`);
+    }
+
     return {
         pathData: result,
         numScanlines,
@@ -2329,6 +2338,103 @@ self.onmessage = async function(e) {
                     type: 'radial-rasterize-v2-complete',
                     data: v2Result
                 }, transferBuffers);
+                break;
+
+            case 'radial-generate-toolpaths':
+                // Complete radial pipeline: rasterize model + generate toolpaths for all strips
+                const {
+                    triangles: radialModelTriangles,
+                    bucketData: radialBucketData,
+                    toolData: radialToolData,
+                    resolution: radialResolution,
+                    angleStep: radialAngleStep,
+                    numAngles: radialNumAngles,
+                    maxRadius: radialMaxRadius,
+                    toolWidth: radialToolWidth,
+                    zFloor: radialToolpathZFloor,
+                    bounds: radialToolpathBounds,
+                    xStep: radialXStep,
+                    yStep: radialYStep,
+                    gridStep: radialGridStep
+                } = data;
+
+                debug.log('[Worker] Starting complete radial toolpath pipeline...');
+
+                // Step 1: Rasterize model (all strips)
+                const radialModelResult = await radialRasterizeV2(
+                    radialModelTriangles,
+                    radialBucketData,
+                    radialResolution,
+                    radialAngleStep,
+                    radialNumAngles,
+                    radialMaxRadius,
+                    radialToolWidth,
+                    radialToolpathZFloor,
+                    radialToolpathBounds
+                );
+
+                debug.log(`[Worker] Rasterized ${radialModelResult.strips.length} strips`);
+
+                // Step 2: Generate toolpath for each strip
+                const stripToolpaths = [];
+                let totalToolpathPoints = 0;
+
+                for (let i = 0; i < radialModelResult.strips.length; i++) {
+                    const strip = radialModelResult.strips[i];
+
+                    // Report progress
+                    self.postMessage({
+                        type: 'toolpath-progress',
+                        data: {
+                            percent: Math.round(((i + 1) / radialModelResult.strips.length) * 100),
+                            current: i + 1,
+                            total: radialModelResult.strips.length,
+                            layer: i + 1
+                        }
+                    });
+
+                    // Skip empty strips (no terrain points)
+                    if (!strip.positions || strip.positions.length === 0) {
+                        debug.log(`[Worker] Strip ${i} (${strip.angle.toFixed(1)}°): EMPTY, skipping`);
+                        continue;
+                    }
+
+                    // Generate toolpath for this strip (single scanline)
+                    const stripToolpathResult = await generateToolpath(
+                        strip.positions,
+                        radialToolData.positions,
+                        radialXStep,
+                        radialYStep,
+                        radialToolpathZFloor,
+                        radialGridStep,
+                        strip.bounds,
+                        true  // singleScanline = true
+                    );
+
+                    stripToolpaths.push({
+                        angle: strip.angle,
+                        pathData: stripToolpathResult.pathData,
+                        numScanlines: stripToolpathResult.numScanlines,
+                        pointsPerLine: stripToolpathResult.pointsPerLine
+                    });
+
+                    totalToolpathPoints += stripToolpathResult.pathData.length;
+
+                    debug.log(`[Worker] Strip ${i} (${strip.angle.toFixed(1)}°): ${stripToolpathResult.pathData.length} toolpath points`);
+                }
+
+                debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points`);
+
+                // Transfer all strip toolpath buffers
+                const toolpathTransferBuffers = stripToolpaths.map(strip => strip.pathData.buffer);
+                self.postMessage({
+                    type: 'radial-toolpaths-complete',
+                    data: {
+                        strips: stripToolpaths,
+                        totalPoints: totalToolpathPoints,
+                        numStrips: stripToolpaths.length
+                    }
+                }, toolpathTransferBuffers);
                 break;
 
             default:
