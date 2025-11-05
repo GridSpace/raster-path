@@ -148,7 +148,7 @@ export class RasterPath {
         if (this.mode === 'planar') {
             return this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: false, onProgress });
         } else {
-            return this.#rasterizeRadial({ triangles, zFloor, boundsOverride, onProgress });
+            throw new Error('Use rasterizeModelRadial() for radial mode');
         }
     }
 
@@ -195,7 +195,7 @@ export class RasterPath {
         if (this.mode === 'planar') {
             return this.#generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress });
         } else {
-            return this.#generateToolpathsRadial({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset, onProgress });
+            throw new Error('Use generateToolpathsRadial() for radial mode');
         }
     }
 
@@ -272,85 +272,135 @@ export class RasterPath {
     }
 
     // ============================================================================
-    // Internal Methods (Radial)
+    // Radial V2 Methods
     // ============================================================================
 
-    async #rasterizeRadial({ triangles, zFloor, boundsOverride, onProgress }) {
-        const data = await new Promise((resolve, reject) => {
-            // Set up progress handler if callback provided
-            if (onProgress) {
-                const progressHandler = (data) => {
-                    onProgress(data.percent, { current: data.current, total: data.total });
-                };
-                this.messageHandlers.set('rasterize-progress', progressHandler);
-            }
+    /**
+     * Radial mode: Rasterize model into angular strips
+     * @param {object} params - Parameters
+     * @param {Float32Array} params.triangles - Unindexed triangle vertices
+     * @param {object} params.toolData - Tool data (required for maxRadius calculation)
+     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
+     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
+     * @param {function} params.onProgress - Optional progress callback (angle, totalAngles) => {}
+     * @returns {Promise<Array>} Array of strip objects [{angle, positions, gridWidth, gridHeight, bounds}, ...]
+     */
+    async rasterizeModelRadial({ triangles, toolData, zFloor, boundsOverride, onProgress }) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+        if (this.mode !== 'radial') {
+            throw new Error('rasterizeModelRadial() only works in radial mode');
+        }
+        if (!toolData) {
+            throw new Error('toolData is required for radial rasterization (tool must be loaded first)');
+        }
 
-            const handler = (data) => {
-                // Clean up progress handler
-                if (onProgress) {
-                    this.messageHandlers.delete('rasterize-progress');
-                }
-                resolve(data);
-            };
+        // Calculate bounds and maxRadius
+        const bounds = boundsOverride || this.#calculateBounds(triangles);
+        const maxRadius = this.#calculateMaxRadius(triangles);
+
+        // Calculate tool width from toolData bounds
+        const toolWidth = Math.max(
+            toolData.bounds.max.y - toolData.bounds.min.y,
+            toolData.bounds.max.z - toolData.bounds.min.z
+        );
+
+        // Create X-buckets for triangle attention
+        const bucketWidth = 2.0; // mm - tune this for performance
+        const bucketData = this.#bucketTrianglesByX(triangles, bounds, bucketWidth);
+
+        // Calculate number of angles
+        const numAngles = Math.ceil(360 / this.rotationStep);
+
+        debug.log('[RasterPath] Radial V2 rasterization:', {
+            numAngles,
+            buckets: bucketData.buckets.length,
+            maxRadius: maxRadius.toFixed(2),
+            toolWidth: toolWidth.toFixed(2),
+            bounds
+        });
+
+        // Send to worker for GPU processing
+        const result = await new Promise((resolve, reject) => {
+            const handler = (data) => resolve(data);
 
             this.#sendMessage(
-                'radial-rasterize',
+                'radial-rasterize-v2',
                 {
                     triangles,
-                    stepSize: this.resolution,
-                    rotationStep: this.rotationStep,
+                    bucketData,
+                    resolution: this.resolution,
+                    angleStep: this.rotationStep,
+                    numAngles,
+                    maxRadius: maxRadius * 1.01, // Safety margin
+                    toolWidth,
                     zFloor: zFloor ?? 0,
-                    boundsOverride,
-                    maxConcurrentTiles: this.config.maxConcurrentTiles,
-                    trianglesPerTile: this.config.trianglesPerTile,
-                    radialRotationOffset: this.config.radialRotationOffset
+                    bounds
                 },
-                'radial-rasterize-complete',
+                'radial-rasterize-v2-complete',
                 handler
             );
         });
 
-        return data;
+        // Stitch strips (result.strips is array of {angle, positions, gridWidth, gridHeight, bounds})
+        return result.strips;
     }
 
-    async #generateToolpathsRadial({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset, onProgress }) {
-        // 3. Generate toolpaths using planar algorithm
-        return new Promise((resolve, reject) => {
-            // Set up progress handler if callback provided
+    /**
+     * Radial mode: Generate toolpaths from strips
+     * @param {object} params - Parameters
+     * @param {Array} params.strips - Output from rasterizeModelRadial()
+     * @param {object} params.toolData - Output from rasterizeTool()
+     * @param {number} params.xStep - X-axis step size in grid points
+     * @param {number} params.yStep - Y-axis step size in grid points
+     * @param {number} params.zFloor - Z floor value for out-of-bounds
+     * @param {function} params.onProgress - Optional progress callback (current, total) => {}
+     * @returns {Promise<object>} Combined toolpath data { strips: [{angle, pathData, ...}, ...], totalPoints }
+     */
+    async generateToolpathsRadial({ strips, toolData, xStep, yStep, zFloor, onProgress }) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+        if (this.mode !== 'radial') {
+            throw new Error('generateToolpathsRadial() only works in radial mode');
+        }
+
+        // Process each strip through planar toolpath generator
+        const stripToolpaths = [];
+        let totalPoints = 0;
+
+        for (let i = 0; i < strips.length; i++) {
+            const strip = strips[i];
+
+            // Call planar toolpath generator for this strip
+            const toolpathResult = await this.#generateToolpathsPlanar({
+                terrainData: strip,
+                toolData,
+                xStep,
+                yStep,
+                zFloor,
+                onProgress: null // Don't forward progress for individual strips
+            });
+
+            stripToolpaths.push({
+                angle: strip.angle,
+                ...toolpathResult
+            });
+
+            totalPoints += toolpathResult.pathData.length;
+
+            // Report progress
             if (onProgress) {
-                const progressHandler = (data) => {
-                    onProgress(data.percent, { current: data.current, total: data.total, layer: data.layer });
-                };
-                this.messageHandlers.set('toolpath-progress', progressHandler);
+                onProgress(i + 1, strips.length);
             }
+        }
 
-            const handler = (data) => {
-                // Clean up progress handler
-                if (onProgress) {
-                    this.messageHandlers.delete('toolpath-progress');
-                }
-
-                // Inject bounds for proper visualization
-                data.generationBounds = bounds;
-                resolve(data);
-            };
-
-            this.#sendMessage(
-                'generate-toolpath',
-                {
-                    terrainPositions,
-                    toolPositions: morphedTool.positions,
-                    xStep,
-                    yStep,
-                    zFloor: zFloor ?? 0,
-                    gridStep: this.resolution,
-                    terrainBounds: bounds,
-                    isRadial: true
-                },
-                'toolpath-complete',
-                handler
-            );
-        });
+        return {
+            strips: stripToolpaths,
+            totalPoints,
+            numStrips: strips.length
+        };
     }
 
     // ============================================================================
@@ -383,6 +433,105 @@ export class RasterPath {
         const id = this.messageId++;
         this.messageHandlers.set(id, { responseType, callback });
         this.worker.postMessage({ type, data });
+    }
+
+    #calculateBounds(triangles) {
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+        for (let i = 0; i < triangles.length; i += 3) {
+            const x = triangles[i];
+            const y = triangles[i + 1];
+            const z = triangles[i + 2];
+
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y);
+            maxY = Math.max(maxY, y);
+            minZ = Math.min(minZ, z);
+            maxZ = Math.max(maxZ, z);
+        }
+
+        return {
+            min: { x: minX, y: minY, z: minZ },
+            max: { x: maxX, y: maxY, z: maxZ }
+        };
+    }
+
+    #calculateMaxRadius(triangles) {
+        let maxRadius = 0;
+
+        for (let i = 0; i < triangles.length; i += 3) {
+            const y = triangles[i + 1];
+            const z = triangles[i + 2];
+            const hypot = Math.sqrt(y * y + z * z);
+            maxRadius = Math.max(maxRadius, hypot);
+        }
+
+        return maxRadius;
+    }
+
+    #bucketTrianglesByX(triangles, bounds, bucketWidth) {
+        const numTriangles = triangles.length / 9;
+        const numBuckets = Math.ceil((bounds.max.x - bounds.min.x) / bucketWidth);
+
+        // Initialize buckets
+        const buckets = [];
+        for (let i = 0; i < numBuckets; i++) {
+            buckets.push({
+                minX: bounds.min.x + i * bucketWidth,
+                maxX: bounds.min.x + (i + 1) * bucketWidth,
+                triangleIndices: []
+            });
+        }
+
+        // Assign triangles to overlapping buckets
+        for (let triIdx = 0; triIdx < numTriangles; triIdx++) {
+            const baseIdx = triIdx * 9;
+
+            // Find triangle X range
+            const x0 = triangles[baseIdx];
+            const x1 = triangles[baseIdx + 3];
+            const x2 = triangles[baseIdx + 6];
+
+            const triMinX = Math.min(x0, x1, x2);
+            const triMaxX = Math.max(x0, x1, x2);
+
+            // Find overlapping buckets
+            const startBucket = Math.max(0, Math.floor((triMinX - bounds.min.x) / bucketWidth));
+            const endBucket = Math.min(numBuckets - 1, Math.floor((triMaxX - bounds.min.x) / bucketWidth));
+
+            for (let b = startBucket; b <= endBucket; b++) {
+                buckets[b].triangleIndices.push(triIdx);
+            }
+        }
+
+        // Flatten triangle indices for GPU
+        const triangleIndices = [];
+        const bucketInfo = [];
+
+        for (let i = 0; i < buckets.length; i++) {
+            const bucket = buckets[i];
+            bucketInfo.push({
+                minX: bucket.minX,
+                maxX: bucket.maxX,
+                startIndex: triangleIndices.length,
+                count: bucket.triangleIndices.length
+            });
+            triangleIndices.push(...bucket.triangleIndices);
+        }
+
+        debug.log('[RasterPath] Bucketing stats:', {
+            numBuckets,
+            avgTrianglesPerBucket: (triangleIndices.length / numBuckets).toFixed(1),
+            totalIndices: triangleIndices.length
+        });
+
+        return {
+            buckets: bucketInfo,
+            triangleIndices: new Uint32Array(triangleIndices),
+            numBuckets
+        };
     }
 
     // ============================================================================

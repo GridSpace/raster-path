@@ -277,84 +277,82 @@ async function rasterizeAll() {
         // Ensure RasterPath is initialized with current settings
         await initRasterPath();
 
-        // Rasterize model
-        if (modelTriangles) {
-            // Center mesh on origin for radial mode
-            let trianglesToRaster = modelTriangles;
-            if (mode === 'radial') {
-                const bounds = calculateTriangleBounds(modelTriangles);
-                const yzCenterY = (bounds.max.y + bounds.min.y) / 2;
-                const yzCenterZ = (bounds.max.z + bounds.min.z) / 2;
-
-                if (Math.abs(yzCenterY) > 0.01 || Math.abs(yzCenterZ) > 0.01) {
-                    console.log(`Centering model for radial: Y offset=${yzCenterY.toFixed(2)}, Z offset=${yzCenterZ.toFixed(2)}`);
-                    trianglesToRaster = new Float32Array(modelTriangles.length);
-                    for (let i = 0; i < modelTriangles.length; i += 3) {
-                        trianglesToRaster[i] = modelTriangles[i]; // X unchanged
-                        trianglesToRaster[i + 1] = modelTriangles[i + 1] - yzCenterY; // Center Y
-                        trianglesToRaster[i + 2] = modelTriangles[i + 2] - yzCenterZ; // Center Z
-                    }
-                }
-            }
-
-            updateInfo('Rasterizing model...');
-            const t0 = performance.now();
-            modelRasterData = await rasterPath.rasterizeModel({
-                triangles: trianglesToRaster,
-                zFloor: zFloor
-            });
-            const t1 = performance.now();
-            updateInfo(`Model rasterized in ${(t1 - t0).toFixed(0)}ms`);
-
-            // Debug radial data
-            if (mode === 'radial') {
-                const gw = modelRasterData.gridWidth;
-                const gh = modelRasterData.gridHeight;
-                const circ = modelRasterData.circumference;
-                const halfRowIdx = Math.floor(gh / 2);
-
-                // Sample different rows
-                const row0 = modelRasterData.positions.slice(0, Math.min(10, gw)); // θ=0°
-                const rowHalf = modelRasterData.positions.slice(halfRowIdx * gw, halfRowIdx * gw + Math.min(10, gw)); // θ=180°
-                const rowQuarter = modelRasterData.positions.slice(Math.floor(gh / 4) * gw, Math.floor(gh / 4) * gw + Math.min(10, gw)); // θ=90°
-                const row3Quarter = modelRasterData.positions.slice(Math.floor(3 * gh / 4) * gw, Math.floor(3 * gh / 4) * gw + Math.min(10, gw)); // θ=270°
-
-                console.log('Radial raster debug:', {
-                    gridWidth: gw,
-                    gridHeight: gh,
-                    circumference: circ,
-                    maxRadius: modelRasterData.maxRadius,
-                    stepSize: resolution,
-                    totalPoints: modelRasterData.positions.length,
-                    expectedSize: gw * gh,
-                    'row_0_theta0deg': Array.from(row0),
-                    'row_quarter_theta90deg': Array.from(rowQuarter),
-                    'row_half_theta180deg': Array.from(rowHalf),
-                    'row_3quarter_theta270deg': Array.from(row3Quarter)
+        if (mode === 'planar') {
+            // Planar mode: rasterize in any order
+            if (modelTriangles) {
+                updateInfo('Rasterizing model...');
+                const t0 = performance.now();
+                modelRasterData = await rasterPath.rasterizeModel({
+                    triangles: modelTriangles,
+                    zFloor: zFloor
                 });
-
-                // Check mesh bounds
-                const meshBounds = {
-                    minY: Infinity, maxY: -Infinity,
-                    minZ: Infinity, maxZ: -Infinity
-                };
-                for (let i = 0; i < modelTriangles.length; i += 3) {
-                    const y = modelTriangles[i + 1];
-                    const z = modelTriangles[i + 2];
-                    meshBounds.minY = Math.min(meshBounds.minY, y);
-                    meshBounds.maxY = Math.max(meshBounds.maxY, y);
-                    meshBounds.minZ = Math.min(meshBounds.minZ, z);
-                    meshBounds.maxZ = Math.max(meshBounds.maxZ, z);
-                }
-                console.log('Mesh YZ bounds:', meshBounds);
+                const t1 = performance.now();
+                updateInfo(`Model rasterized in ${(t1 - t0).toFixed(0)}ms`);
             }
-        }
 
-        // Rasterize tool
-        if (toolTriangles) {
+            if (toolTriangles) {
+                updateInfo('Rasterizing tool...');
+                const t0 = performance.now();
+                toolRasterData = await rasterPath.rasterizeTool({
+                    triangles: toolTriangles,
+                    zFloor: zFloor
+                });
+                const t1 = performance.now();
+                updateInfo(`Tool rasterized in ${(t1 - t0).toFixed(0)}ms`);
+            }
+        } else {
+            // Radial mode: MUST rasterize tool FIRST, then model
+            if (!toolTriangles) {
+                updateInfo('Error: Radial mode requires tool to be loaded first');
+                return;
+            }
+
+            // Rasterize tool first
+            updateInfo('Rasterizing tool...');
+            const t0 = performance.now();
             toolRasterData = await rasterPath.rasterizeTool({
                 triangles: toolTriangles,
                 zFloor: zFloor
+            });
+            const t1 = performance.now();
+            updateInfo(`Tool rasterized in ${(t1 - t0).toFixed(0)}ms`);
+
+            if (!modelTriangles) {
+                updateInfo('Tool rasterized. Load model to continue.');
+                return;
+            }
+
+            // Center mesh on origin for radial mode
+            let trianglesToRaster = modelTriangles;
+            const bounds = calculateTriangleBounds(modelTriangles);
+            const yzCenterY = (bounds.max.y + bounds.min.y) / 2;
+            const yzCenterZ = (bounds.max.z + bounds.min.z) / 2;
+
+            if (Math.abs(yzCenterY) > 0.01 || Math.abs(yzCenterZ) > 0.01) {
+                console.log(`Centering model for radial: Y offset=${yzCenterY.toFixed(2)}, Z offset=${yzCenterZ.toFixed(2)}`);
+                trianglesToRaster = new Float32Array(modelTriangles.length);
+                for (let i = 0; i < modelTriangles.length; i += 3) {
+                    trianglesToRaster[i] = modelTriangles[i]; // X unchanged
+                    trianglesToRaster[i + 1] = modelTriangles[i + 1] - yzCenterY; // Center Y
+                    trianglesToRaster[i + 2] = modelTriangles[i + 2] - yzCenterZ; // Center Z
+                }
+            }
+
+            // Rasterize model (returns array of strips)
+            updateInfo('Rasterizing model (radial v2)...');
+            const t2 = performance.now();
+            modelRasterData = await rasterPath.rasterizeModelRadial({
+                triangles: trianglesToRaster,
+                toolData: toolRasterData,
+                zFloor: zFloor
+            });
+            const t3 = performance.now();
+            updateInfo(`Model rasterized: ${modelRasterData.length} strips in ${(t3 - t2).toFixed(0)}ms`);
+
+            console.log('Radial V2 strips:', {
+                numStrips: modelRasterData.length,
+                firstStrip: modelRasterData[0],
+                totalPoints: modelRasterData.reduce((sum, s) => sum + s.pointCount, 0)
             });
         }
 
@@ -382,17 +380,32 @@ async function generateToolpath() {
         updateInfo('Generating toolpath...');
         const t0 = performance.now();
 
-        toolpathData = await rasterPath.generateToolpaths({
-            terrainData: modelRasterData,
-            toolData: toolRasterData,
-            xStep: xStep,
-            yStep: yStep,
-            zFloor: zFloor
-        });
+        if (mode === 'planar') {
+            toolpathData = await rasterPath.generateToolpaths({
+                terrainData: modelRasterData,
+                toolData: toolRasterData,
+                xStep: xStep,
+                yStep: yStep,
+                zFloor: zFloor
+            });
 
-        const t1 = performance.now();
-        const numPoints = toolpathData.pathData.length;
-        updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+            const t1 = performance.now();
+            const numPoints = toolpathData.pathData.length;
+            updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+        } else {
+            // Radial mode: modelRasterData is array of strips
+            toolpathData = await rasterPath.generateToolpathsRadial({
+                strips: modelRasterData,
+                toolData: toolRasterData,
+                xStep: xStep,
+                yStep: yStep,
+                zFloor: zFloor
+            });
+
+            const t1 = performance.now();
+            console.log('Radial toolpaths generated:', toolpathData);
+            updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+        }
 
         // Auto-enable toolpath view
         document.getElementById('show-paths').checked = true;
@@ -835,8 +848,8 @@ function displayToolpaths(wrapped) {
 // ============================================================================
 
 function updateInfo(text) {
-    document.getElementById('info').textContent = text;
     console.log(text);
+    document.getElementById('info').textContent = text;
 }
 
 function updateButtonStates() {
