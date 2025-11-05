@@ -2041,8 +2041,14 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const outputSize = numAngles * bucketData.numBuckets * bucketGridWidth * gridYHeight * 4;
     const outputBuffer = device.createBuffer({
         size: outputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
     });
+
+    // CRITICAL: Initialize output buffer with zFloor to avoid reading garbage data
+    // GPU buffers contain random values by default!
+    const initData = new Float32Array(outputSize / 4);
+    initData.fill(zFloor);
+    device.queue.writeBuffer(outputBuffer, 0, initData);
 
     // Create uniforms with proper alignment (f32 and u32 mixed)
     // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32
@@ -2117,6 +2123,9 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputSize);
     device.queue.submit([commandEncoder.finish()]);
 
+    // CRITICAL: Wait for GPU to finish before reading results
+    await device.queue.onSubmittedWorkDone();
+
     await stagingBuffer.mapAsync(GPUMapMode.READ);
     const outputData = new Float32Array(stagingBuffer.getMappedRange());
     const outputCopy = new Float32Array(outputData);
@@ -2139,6 +2148,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
 
     for (let angleIdx = 0; angleIdx < numAngles; angleIdx++) {
         const stripData = new Float32Array(gridWidth * gridYHeight);
+        stripData.fill(zFloor);  // Initialize with zFloor, not zeros!
 
         // Gather from each bucket
         for (let bucketIdx = 0; bucketIdx < bucketData.numBuckets; bucketIdx++) {

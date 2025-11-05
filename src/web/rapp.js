@@ -307,7 +307,7 @@ async function rasterizeAll() {
                 return;
             }
 
-            // Rasterize tool first
+            // Rasterize tool only (model is rasterized during toolpath generation)
             updateInfo('Rasterizing tool...');
             const t0 = performance.now();
             toolRasterData = await rasterPath.rasterizeTool({
@@ -318,9 +318,66 @@ async function rasterizeAll() {
             updateInfo(`Tool rasterized in ${(t1 - t0).toFixed(0)}ms`);
 
             if (!modelTriangles) {
-                updateInfo('Tool rasterized. Load model to continue.');
-                return;
+                updateInfo('Tool rasterized. Load model and click "Generate Toolpath" to continue.');
+            } else {
+                updateInfo('Tool rasterized. Click "Generate Toolpath" to process model.');
             }
+
+            // Update button states for radial mode
+            updateButtonStates();
+            return; // Don't rasterize model here - do it in toolpath generation
+        }
+
+        updateInfo('Rasterization complete');
+
+        // Auto-enable raster view
+        document.getElementById('show-raster').checked = true;
+
+        updateVisualization();
+        updateButtonStates();
+
+    } catch (error) {
+        console.error('Rasterization error:', error);
+        updateInfo(`Error: ${error.message}`);
+    }
+}
+
+async function generateToolpath() {
+    if (mode === 'planar') {
+        if (!modelRasterData || !toolRasterData) {
+            updateInfo('Both model and tool must be rasterized first');
+            return;
+        }
+    } else {
+        // Radial mode: only need tool rasterized, model is rasterized here
+        if (!toolRasterData) {
+            updateInfo('Tool must be rasterized first');
+            return;
+        }
+        if (!modelTriangles) {
+            updateInfo('Model STL must be loaded');
+            return;
+        }
+    }
+
+    try {
+        const t0 = performance.now();
+
+        if (mode === 'planar') {
+            updateInfo('Generating toolpath...');
+            toolpathData = await rasterPath.generateToolpaths({
+                terrainData: modelRasterData,
+                toolData: toolRasterData,
+                xStep: xStep,
+                yStep: yStep,
+                zFloor: zFloor
+            });
+
+            const t1 = performance.now();
+            const numPoints = toolpathData.pathData.length;
+            updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+        } else {
+            // Radial mode: Rasterize model first, then generate toolpath
 
             // Center mesh on origin for radial mode
             let trianglesToRaster = modelTriangles;
@@ -340,60 +397,21 @@ async function rasterizeAll() {
 
             // Rasterize model (returns array of strips)
             updateInfo('Rasterizing model (radial v2)...');
-            const t2 = performance.now();
+            const t1 = performance.now();
             modelRasterData = await rasterPath.rasterizeModelRadial({
                 triangles: trianglesToRaster,
                 toolData: toolRasterData,
                 zFloor: zFloor
             });
-            const t3 = performance.now();
-            updateInfo(`Model rasterized: ${modelRasterData.length} strips in ${(t3 - t2).toFixed(0)}ms`);
-
+            const t2 = performance.now();
             console.log('Radial V2 strips:', {
                 numStrips: modelRasterData.length,
                 firstStrip: modelRasterData[0],
                 totalPoints: modelRasterData.reduce((sum, s) => sum + s.pointCount, 0)
             });
-        }
 
-        updateInfo('Rasterization complete');
-
-        // Auto-enable raster view
-        document.getElementById('show-raster').checked = true;
-
-        updateVisualization();
-        updateButtonStates();
-
-    } catch (error) {
-        console.error('Rasterization error:', error);
-        updateInfo(`Error: ${error.message}`);
-    }
-}
-
-async function generateToolpath() {
-    if (!modelRasterData || !toolRasterData) {
-        updateInfo('Both model and tool must be rasterized first');
-        return;
-    }
-
-    try {
-        updateInfo('Generating toolpath...');
-        const t0 = performance.now();
-
-        if (mode === 'planar') {
-            toolpathData = await rasterPath.generateToolpaths({
-                terrainData: modelRasterData,
-                toolData: toolRasterData,
-                xStep: xStep,
-                yStep: yStep,
-                zFloor: zFloor
-            });
-
-            const t1 = performance.now();
-            const numPoints = toolpathData.pathData.length;
-            updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
-        } else {
-            // Radial mode: modelRasterData is array of strips
+            // Generate toolpath from strips
+            updateInfo('Generating toolpath...');
             toolpathData = await rasterPath.generateToolpathsRadial({
                 strips: modelRasterData,
                 toolData: toolRasterData,
@@ -402,9 +420,9 @@ async function generateToolpath() {
                 zFloor: zFloor
             });
 
-            const t1 = performance.now();
+            const t3 = performance.now();
             console.log('Radial toolpaths generated:', toolpathData);
-            updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+            updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t3 - t0).toFixed(0)}ms (raster: ${(t2-t1).toFixed(0)}ms, toolpath: ${(t3-t2).toFixed(0)}ms)`);
         }
 
         // Auto-enable toolpath view
@@ -896,10 +914,19 @@ function updateButtonStates() {
     const hasModel = modelTriangles !== null;
     const hasTool = toolTriangles !== null;
     const hasAnySTL = hasModel || hasTool;
-    const hasBothRasters = modelRasterData !== null && toolRasterData !== null;
+
+    // Different requirements for planar vs radial mode
+    let canGenerateToolpath;
+    if (mode === 'planar') {
+        // Planar: need both model and tool rasterized
+        canGenerateToolpath = modelRasterData !== null && toolRasterData !== null;
+    } else {
+        // Radial: only need tool rasterized (model is rasterized during toolpath gen)
+        canGenerateToolpath = toolRasterData !== null && hasModel;
+    }
 
     document.getElementById('rasterize').disabled = !hasAnySTL;
-    document.getElementById('generate-toolpath').disabled = !hasBothRasters;
+    document.getElementById('generate-toolpath').disabled = !canGenerateToolpath;
 }
 
 // ============================================================================
