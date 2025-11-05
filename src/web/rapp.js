@@ -783,6 +783,16 @@ function displayToolpaths(wrapped) {
         const { strips } = toolpathData;
         const stepSize = resolution;
 
+        console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips');
+        if (strips.length > 0) {
+            console.log('[Toolpath Display] First strip sample:', {
+                angle: strips[0].angle,
+                numScanlines: strips[0].numScanlines,
+                pointsPerLine: strips[0].pointsPerLine,
+                firstValues: strips[0].pathData.slice(0, 5)
+            });
+        }
+
         if (wrapped) {
             // Wrap each strip around X-axis at its angle
             for (const strip of strips) {
@@ -798,10 +808,12 @@ function displayToolpaths(wrapped) {
                 for (let line = 0; line < numScanlines; line++) {
                     for (let pt = 0; pt < pointsPerLine; pt++) {
                         const idx = line * pointsPerLine + pt;
-                        const radius = pathData[idx];
+                        const radius = pathData[idx];  // Tool radius from X-axis
 
                         const gridX = pt * xStep;
                         const x = stripBounds.min.x + gridX * stepSize;
+
+                        // Wrap the radius around X-axis at this angle
                         const yWrapped = radius * cosTheta;
                         const zWrapped = radius * sinTheta;
 

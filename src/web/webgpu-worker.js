@@ -2148,7 +2148,8 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
             }
         }
 
-        // Convert to sparse format [gridX, gridY, Z, ...]
+        // Convert to sparse format [worldX, worldY, Z, ...]
+        // NOTE: Must use world coordinates, not grid indices, for toolpath generator
         const sparsePositions = [];
         let minZ = Infinity, maxZ = -Infinity;
         for (let y = 0; y < gridYHeight; y++) {
@@ -2157,7 +2158,10 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
                 minZ = Math.min(minZ, z);
                 maxZ = Math.max(maxZ, z);
                 if (z > zFloor + 0.001) {  // Valid data
-                    sparsePositions.push(x, y, z);
+                    // Convert grid indices to world coordinates
+                    const worldX = bounds.min.x + x * resolution;
+                    const worldY = y * resolution;  // Y is 0 to toolWidth
+                    sparsePositions.push(worldX, worldY, z);
                 }
             }
         }
