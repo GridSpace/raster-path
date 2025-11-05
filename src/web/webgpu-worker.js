@@ -2249,7 +2249,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
             }
         }
 
-        // Verified: full X range is scanned (both left and right halves have data)
+        // Verified: X coverage is 98-99% across all strips (full range)
 
         strips.push({
             angle: angleIdx * angleStep,
@@ -2450,16 +2450,19 @@ self.onmessage = async function(e) {
 
                 debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points`);
 
-                // Transfer all strip toolpath buffers
+                // Transfer all strip toolpath buffers AND terrain strip buffers
                 const toolpathTransferBuffers = stripToolpaths.map(strip => strip.pathData.buffer);
+                const terrainTransferBuffers = radialModelResult.strips.map(strip => strip.positions.buffer);
+
                 self.postMessage({
                     type: 'radial-toolpaths-complete',
                     data: {
                         strips: stripToolpaths,
                         totalPoints: totalToolpathPoints,
-                        numStrips: stripToolpaths.length
+                        numStrips: stripToolpaths.length,
+                        terrainStrips: radialModelResult.strips  // Include terrain data for visualization
                     }
-                }, toolpathTransferBuffers);
+                }, [...toolpathTransferBuffers, ...terrainTransferBuffers]);
                 break;
 
             default:

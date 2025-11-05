@@ -396,7 +396,11 @@ async function generateToolpath() {
             console.log('Radial toolpaths generated:', toolpathData);
             updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
 
-            // Note: modelRasterData is not set since we skip that intermediate step
+            // Store terrain strips for visualization
+            if (toolpathData.terrainStrips) {
+                modelRasterData = toolpathData.terrainStrips;
+                console.log('[Radial] Terrain strips available:', modelRasterData.length, 'strips');
+            }
             // This is fine - we only need toolpathData for visualization
         }
 
@@ -630,60 +634,55 @@ function displayModelRaster(wrapped) {
         }
 
     } else {
-        // Radial: returned data is planar (unwrapped)
-        const { positions: rasterPos, bounds, circumference, maxRadius, rotationStepDegrees } = modelRasterData;
+        // Radial: modelRasterData is an array of strips
+        // Each strip has: { angle, positions (sparse XYZ), gridWidth, gridHeight, bounds }
+        if (!Array.isArray(modelRasterData)) {
+            console.error('[Display] modelRasterData is not an array of strips');
+            return;
+        }
 
         if (wrapped) {
-            // Wrap around X-axis
-            const stepSize = resolution;
+            // Wrap each strip around X-axis at its angle
+            for (const strip of modelRasterData) {
+                const { angle, positions: stripPositions } = strip;
 
-            if (modelRasterData.isDense) {
-                // Dense array format
-                const gridWidth = modelRasterData.gridWidth;
-                const gridHeight = modelRasterData.gridHeight;
+                if (!stripPositions || stripPositions.length === 0) continue;
 
-                for (let gy = 0; gy < gridHeight; gy++) {
-                    const theta = gy * (rotationStepDegrees * Math.PI / 180);
-                    const cosTheta = Math.cos(theta);
-                    const sinTheta = Math.sin(theta);
+                const theta = angle * Math.PI / 180;
+                const cosTheta = Math.cos(theta);
+                const sinTheta = Math.sin(theta);
 
-                    for (let gx = 0; gx < gridWidth; gx++) {
-                        const idx = gy * gridWidth + gx;
-                        const radius = rasterPos[idx];
+                // Strip positions are sparse XYZ triplets
+                for (let i = 0; i < stripPositions.length; i += 3) {
+                    const x = stripPositions[i];
+                    const y_planar = stripPositions[i + 1];  // Y in planar coordinates
+                    const terrainHeight = stripPositions[i + 2];  // Distance from X-axis
 
-                        if (radius > -1e9) {
-                            const x = bounds.min.x + gx * stepSize;
-                            const y = radius * cosTheta;
-                            const z = radius * sinTheta;
+                    // Wrap: use terrainHeight as radial distance from X-axis
+                    const y = terrainHeight * cosTheta;
+                    const z = terrainHeight * sinTheta;
 
-                            positions.push(x, y, z);
-                            colors.push(0, 1, 0);  // Green
-                        }
-                    }
+                    positions.push(x, y, z);
+                    colors.push(0, 1, 0);  // Green
                 }
             }
         } else {
-            // Show unwrapped (planar)
-            const stepSize = resolution;
+            // Show unwrapped (planar) - lay out strips side by side
+            for (let stripIdx = 0; stripIdx < modelRasterData.length; stripIdx++) {
+                const strip = modelRasterData[stripIdx];
+                const { positions: stripPositions } = strip;
 
-            if (modelRasterData.isDense) {
-                const gridWidth = modelRasterData.gridWidth;
-                const gridHeight = modelRasterData.gridHeight;
+                if (!stripPositions || stripPositions.length === 0) continue;
 
-                for (let gy = 0; gy < gridHeight; gy++) {
-                    const y = gy * stepSize;
+                const stripY = stripIdx * resolution * 10;  // Offset each strip for visibility
 
-                    for (let gx = 0; gx < gridWidth; gx++) {
-                        const idx = gy * gridWidth + gx;
-                        const radius = rasterPos[idx];
+                // Strip positions are sparse XYZ triplets
+                for (let i = 0; i < stripPositions.length; i += 3) {
+                    const x = stripPositions[i];
+                    const terrainHeight = stripPositions[i + 2];
 
-                        if (radius > -1e9) {
-                            const x = bounds.min.x + gx * stepSize;
-
-                            positions.push(x, y, radius);
-                            colors.push(0, 1, 0);  // Green
-                        }
-                    }
+                    positions.push(x, stripY, terrainHeight);
+                    colors.push(0, 1, 0);  // Green
                 }
             }
         }
