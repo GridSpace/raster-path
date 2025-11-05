@@ -1179,7 +1179,9 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
 
     // If singleScanline mode, override bounds to force centerline only
     if (singleScanline) {
-        const centerY = (terrainBounds.min.y + terrainBounds.max.y) / 2;
+        // For radial mode: Y=0 is the X-axis itself (radius=0)
+        // The tool centerline should scan at Y=0, not at the midpoint
+        const centerY = terrainBounds.min.y;  // Use min.y which should be 0
         terrainBounds = {
             min: { ...terrainBounds.min, y: centerY },
             max: { ...terrainBounds.max, y: centerY }
