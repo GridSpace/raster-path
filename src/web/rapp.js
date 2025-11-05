@@ -756,12 +756,12 @@ function displayToolRaster() {
 function displayToolpaths(wrapped) {
     if (!toolpathData) return;
 
-    const { pathData, numScanlines, pointsPerLine } = toolpathData;
     const positions = [];
     const colors = [];
 
     if (mode === 'planar') {
         // Planar toolpaths
+        const { pathData, numScanlines, pointsPerLine } = toolpathData;
         const bounds = toolpathData.generationBounds || modelRasterData.bounds;
         const stepSize = resolution;
 
@@ -779,47 +779,60 @@ function displayToolpaths(wrapped) {
         }
 
     } else {
-        // Radial toolpaths - returned as planar, wrap if needed
-        const bounds = toolpathData.generationBounds || modelRasterData.bounds;
-        const rotationStepDegrees = modelRasterData.rotationStepDegrees;
+        // Radial V2 toolpaths - each strip is independent
+        const { strips } = toolpathData;
         const stepSize = resolution;
 
         if (wrapped) {
-            // Wrap around X-axis
-            for (let line = 0; line < numScanlines; line++) {
-                const gridY = line * yStep;
-                const theta = gridY * (rotationStepDegrees * Math.PI / 180);
+            // Wrap each strip around X-axis at its angle
+            for (const strip of strips) {
+                const { angle, pathData, numScanlines, pointsPerLine } = strip;
+                // Get bounds from the strip's terrain data (passed through from rasterization)
+                const stripBounds = modelRasterData.find(s => s.angle === angle)?.bounds ||
+                                  { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
+
+                const theta = angle * Math.PI / 180;
                 const cosTheta = Math.cos(theta);
                 const sinTheta = Math.sin(theta);
 
-                for (let pt = 0; pt < pointsPerLine; pt++) {
-                    const idx = line * pointsPerLine + pt;
-                    const radius = pathData[idx];
+                for (let line = 0; line < numScanlines; line++) {
+                    for (let pt = 0; pt < pointsPerLine; pt++) {
+                        const idx = line * pointsPerLine + pt;
+                        const radius = pathData[idx];
 
-                    const gridX = pt * xStep;
-                    const x = bounds.min.x + gridX * stepSize;
-                    const yWrapped = radius * cosTheta;
-                    const zWrapped = radius * sinTheta;
+                        const gridX = pt * xStep;
+                        const x = stripBounds.min.x + gridX * stepSize;
+                        const yWrapped = radius * cosTheta;
+                        const zWrapped = radius * sinTheta;
 
-                    positions.push(x, yWrapped, zWrapped);
-                    colors.push(1, 0.4, 0);  // Orange
+                        positions.push(x, yWrapped, zWrapped);
+                        colors.push(1, 0.4, 0);  // Orange
+                    }
                 }
             }
         } else {
-            // Show unwrapped (planar)
-            for (let line = 0; line < numScanlines; line++) {
-                const gridY = line * yStep;
-                const y = gridY * stepSize;
+            // Show unwrapped (not very useful for radial, but supported)
+            for (const strip of strips) {
+                const { angle, pathData, numScanlines, pointsPerLine } = strip;
+                // Get bounds from the strip's terrain data
+                const stripBounds = modelRasterData.find(s => s.angle === angle)?.bounds ||
+                                  { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
+                const yOffset = angle; // Use angle as Y offset for visualization
 
-                for (let pt = 0; pt < pointsPerLine; pt++) {
-                    const idx = line * pointsPerLine + pt;
-                    const radius = pathData[idx];
+                for (let line = 0; line < numScanlines; line++) {
+                    const gridY = line * yStep;
+                    const y = yOffset + gridY * stepSize;
 
-                    const gridX = pt * xStep;
-                    const x = bounds.min.x + gridX * stepSize;
+                    for (let pt = 0; pt < pointsPerLine; pt++) {
+                        const idx = line * pointsPerLine + pt;
+                        const radius = pathData[idx];
 
-                    positions.push(x, y, radius);
-                    colors.push(1, 0.4, 0);  // Orange
+                        const gridX = pt * xStep;
+                        const x = stripBounds.min.x + gridX * stepSize;
+
+                        positions.push(x, y, radius);
+                        colors.push(1, 0.4, 0);  // Orange
+                    }
                 }
             }
         }
