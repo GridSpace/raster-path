@@ -373,6 +373,14 @@ export class RasterPath {
         for (let i = 0; i < strips.length; i++) {
             const strip = strips[i];
 
+            // Skip empty strips
+            if (strip.pointCount === 0 || !strip.positions || strip.positions.length === 0) {
+                if (onProgress) {
+                    onProgress(i + 1, strips.length);
+                }
+                continue;
+            }
+
             // Call planar toolpath generator for this strip
             const toolpathResult = await this.#generateToolpathsPlanar({
                 terrainData: strip,
