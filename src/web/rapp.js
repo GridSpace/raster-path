@@ -785,19 +785,33 @@ function displayToolpaths(wrapped) {
 
         console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips');
         if (strips.length > 0) {
+            const firstStrip = strips[0];
+            const terrainStrip = modelRasterData.find(s => s.angle === firstStrip.angle);
+
+            // Find min/max without stack overflow
+            let minVal = Infinity, maxVal = -Infinity;
+            for (let i = 0; i < firstStrip.pathData.length; i++) {
+                minVal = Math.min(minVal, firstStrip.pathData[i]);
+                maxVal = Math.max(maxVal, firstStrip.pathData[i]);
+            }
+
             console.log('[Toolpath Display] First strip sample:', {
-                angle: strips[0].angle,
-                numScanlines: strips[0].numScanlines,
-                pointsPerLine: strips[0].pointsPerLine,
-                firstValues: strips[0].pathData.slice(0, 5)
+                angle: firstStrip.angle,
+                numScanlines: firstStrip.numScanlines,
+                pointsPerLine: firstStrip.pointsPerLine,
+                firstValues: Array.from(firstStrip.pathData.slice(0, 10)),
+                minValue: minVal,
+                maxValue: maxVal,
+                terrainBounds: terrainStrip?.bounds
             });
         }
 
         if (wrapped) {
             // Wrap each strip around X-axis at its angle
+            // Each strip should have numScanlines=1 (single centerline)
             for (const strip of strips) {
                 const { angle, pathData, numScanlines, pointsPerLine } = strip;
-                // Get bounds from the strip's terrain data (passed through from rasterization)
+                // Get bounds from the strip's terrain data
                 const stripBounds = modelRasterData.find(s => s.angle === angle)?.bounds ||
                                   { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
 
@@ -805,10 +819,11 @@ function displayToolpaths(wrapped) {
                 const cosTheta = Math.cos(theta);
                 const sinTheta = Math.sin(theta);
 
+                // Should only be 1 scanline for radial
                 for (let line = 0; line < numScanlines; line++) {
                     for (let pt = 0; pt < pointsPerLine; pt++) {
                         const idx = line * pointsPerLine + pt;
-                        const radius = pathData[idx];  // Tool radius from X-axis
+                        const radius = pathData[idx];  // Tool tip radius from X-axis
 
                         const gridX = pt * xStep;
                         const x = stripBounds.min.x + gridX * stepSize;

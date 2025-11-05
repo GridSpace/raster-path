@@ -236,7 +236,7 @@ export class RasterPath {
         return data;
     }
 
-    async #generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress }) {
+    async #generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress, singleScanline = false }) {
         return new Promise((resolve, reject) => {
             // Set up progress handler if callback provided
             if (onProgress) {
@@ -263,7 +263,8 @@ export class RasterPath {
                     yStep,
                     zFloor: zFloor ?? 0,
                     gridStep: this.resolution,
-                    terrainBounds: terrainData.bounds
+                    terrainBounds: terrainData.bounds,
+                    singleScanline
                 },
                 'toolpath-complete',
                 handler
@@ -381,14 +382,16 @@ export class RasterPath {
                 continue;
             }
 
-            // Call planar toolpath generator for this strip
+            // For radial, we want a single scanline down the center of the strip
+            // Use singleScanline flag to force centerline-only processing
             const toolpathResult = await this.#generateToolpathsPlanar({
                 terrainData: strip,
                 toolData,
                 xStep,
-                yStep,
+                yStep,  // Ignored when singleScanline=true
                 zFloor,
-                onProgress: null // Don't forward progress for individual strips
+                onProgress: null, // Don't forward progress for individual strips
+                singleScanline: true  // Force single centerline scan
             });
 
             stripToolpaths.push({

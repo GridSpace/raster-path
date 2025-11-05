@@ -1158,7 +1158,7 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
 }
 
 // Generate toolpath with tiling support (public API)
-async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
+async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null, singleScanline = false) {
     // Calculate bounds if not provided
     if (!terrainBounds) {
         let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -1175,6 +1175,16 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
             min: { x: minX, y: minY, z: minZ },
             max: { x: maxX, y: maxY, z: maxZ }
         };
+    }
+
+    // If singleScanline mode, override bounds to force centerline only
+    if (singleScanline) {
+        const centerY = (terrainBounds.min.y + terrainBounds.max.y) / 2;
+        terrainBounds = {
+            min: { ...terrainBounds.min, y: centerY },
+            max: { ...terrainBounds.max, y: centerY }
+        };
+        debug.log('[Toolpath] Single scanline mode: forcing centerline at Y =', centerY.toFixed(3));
     }
 
     // Debug tool bounds and center
@@ -2232,9 +2242,9 @@ self.onmessage = async function(e) {
                 break;
 
             case 'generate-toolpath':
-                const { terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds } = data;
+                const { terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds, singleScanline } = data;
                 const toolpathResult = await generateToolpath(
-                    terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds
+                    terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep, terrainBounds, singleScanline
                 );
                 self.postMessage({
                     type: 'toolpath-complete',
