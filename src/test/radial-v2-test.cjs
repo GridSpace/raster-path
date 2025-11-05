@@ -79,6 +79,26 @@ function createWindow() {
                 console.log('✓ Parsed terrain:', terrainTriangles.length / 9, 'triangles');
                 console.log('✓ Parsed tool:', toolTriangles.length / 9, 'triangles');
 
+                // Check terrain bounds
+                let minX = Infinity, maxX = -Infinity;
+                let minY = Infinity, maxY = -Infinity;
+                let minZ = Infinity, maxZ = -Infinity;
+                for (let i = 0; i < terrainTriangles.length; i += 3) {
+                    minX = Math.min(minX, terrainTriangles[i]);
+                    maxX = Math.max(maxX, terrainTriangles[i]);
+                    minY = Math.min(minY, terrainTriangles[i + 1]);
+                    maxY = Math.max(maxY, terrainTriangles[i + 1]);
+                    minZ = Math.min(minZ, terrainTriangles[i + 2]);
+                    maxZ = Math.max(maxZ, terrainTriangles[i + 2]);
+                }
+                console.log('Terrain bounds:');
+                console.log('  X: [' + minX.toFixed(2) + ', ' + maxX.toFixed(2) + ']');
+                console.log('  Y: [' + minY.toFixed(2) + ', ' + maxY.toFixed(2) + ']');
+                console.log('  Z: [' + minZ.toFixed(2) + ', ' + maxZ.toFixed(2) + ']');
+                const centerY = (minY + maxY) / 2;
+                const centerZ = (minZ + maxZ) / 2;
+                console.log('  YZ center: (' + centerY.toFixed(2) + ', ' + centerZ.toFixed(2) + ')');
+
                 // Test parameters
                 const resolution = 0.5; // 0.5mm for faster testing
                 const rotationStep = 10.0; // 10 degrees (36 strips) - production-like

@@ -379,21 +379,8 @@ async function generateToolpath() {
         } else {
             // Radial mode: Complete pipeline in worker (rasterize + generate toolpath)
 
-            // Center mesh on origin for radial mode
+            // Note: Model centering is now handled automatically by rasterizeAndGenerateToolpathsRadial()
             let trianglesToProcess = modelTriangles;
-            const bounds = calculateTriangleBounds(modelTriangles);
-            const yzCenterY = (bounds.max.y + bounds.min.y) / 2;
-            const yzCenterZ = (bounds.max.z + bounds.min.z) / 2;
-
-            if (Math.abs(yzCenterY) > 0.01 || Math.abs(yzCenterZ) > 0.01) {
-                console.log(`Centering model for radial: Y offset=${yzCenterY.toFixed(2)}, Z offset=${yzCenterZ.toFixed(2)}`);
-                trianglesToProcess = new Float32Array(modelTriangles.length);
-                for (let i = 0; i < modelTriangles.length; i += 3) {
-                    trianglesToProcess[i] = modelTriangles[i]; // X unchanged
-                    trianglesToProcess[i + 1] = modelTriangles[i + 1] - yzCenterY; // Center Y
-                    trianglesToProcess[i + 2] = modelTriangles[i + 2] - yzCenterZ; // Center Z
-                }
-            }
 
             // Complete pipeline in worker (more efficient, avoids race conditions)
             updateInfo('Processing radial toolpath (rasterize + generate)...');

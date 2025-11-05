@@ -297,9 +297,29 @@ export class RasterPath {
             throw new Error('toolData is required for radial rasterization (tool must be loaded first)');
         }
 
-        // Calculate bounds and maxRadius
-        const bounds = boundsOverride || this.#calculateBounds(triangles);
-        const maxRadius = this.#calculateMaxRadius(triangles);
+        // Calculate bounds
+        const originalBounds = boundsOverride || this.#calculateBounds(triangles);
+
+        // Center model in YZ plane (required for radial rasterization)
+        const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
+        const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
+
+        let centeredTriangles = triangles;
+        let bounds = originalBounds;
+
+        if (Math.abs(centerY) > 0.001 || Math.abs(centerZ) > 0.001) {
+            debug.log(`[RasterPath] Centering model in YZ: offset Y=${centerY.toFixed(3)}, Z=${centerZ.toFixed(3)}`);
+            centeredTriangles = new Float32Array(triangles.length);
+            for (let i = 0; i < triangles.length; i += 3) {
+                centeredTriangles[i] = triangles[i];                    // X unchanged
+                centeredTriangles[i + 1] = triangles[i + 1] - centerY;  // Center Y
+                centeredTriangles[i + 2] = triangles[i + 2] - centerZ;  // Center Z
+            }
+            // Recalculate bounds after centering
+            bounds = this.#calculateBounds(centeredTriangles);
+        }
+
+        const maxRadius = this.#calculateMaxRadius(centeredTriangles);
 
         // Calculate tool width from toolData bounds
         const toolWidth = Math.max(
@@ -309,9 +329,9 @@ export class RasterPath {
 
         // Create X-buckets for triangle attention
         const bucketWidth = 2.0; // mm - tune this for performance
-        const bucketData = this.#bucketTrianglesByX(triangles, bounds, bucketWidth);
+        const bucketData = this.#bucketTrianglesByX(centeredTriangles, bounds, bucketWidth);
 
-        // Calculate number of angles
+        // Calculate number of angles - full 360° rotation
         const numAngles = Math.ceil(360 / this.rotationStep);
 
         debug.log('[RasterPath] Radial V2 rasterization:', {
@@ -329,7 +349,7 @@ export class RasterPath {
             this.#sendMessage(
                 'radial-rasterize-v2',
                 {
-                    triangles,
+                    triangles: centeredTriangles,
                     bucketData,
                     resolution: this.resolution,
                     angleStep: this.rotationStep,
@@ -435,15 +455,28 @@ export class RasterPath {
         }
 
         // Calculate bounds
-        const bounds = this.#calculateBounds(triangles);
-        const centerY = (bounds.min.y + bounds.max.y) / 2;
-        const centerZ = (bounds.min.z + bounds.max.z) / 2;
-        const maxRadius = Math.sqrt(
-            Math.max(
-                (bounds.max.y - centerY) ** 2 + (bounds.max.z - centerZ) ** 2,
-                (bounds.min.y - centerY) ** 2 + (bounds.min.z - centerZ) ** 2
-            )
-        );
+        const originalBounds = this.#calculateBounds(triangles);
+
+        // Center model in YZ plane (required for radial rasterization)
+        const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
+        const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
+
+        let centeredTriangles = triangles;
+        let bounds = originalBounds;
+
+        if (Math.abs(centerY) > 0.001 || Math.abs(centerZ) > 0.001) {
+            debug.log(`[RasterPath] Centering model in YZ: offset Y=${centerY.toFixed(3)}, Z=${centerZ.toFixed(3)}`);
+            centeredTriangles = new Float32Array(triangles.length);
+            for (let i = 0; i < triangles.length; i += 3) {
+                centeredTriangles[i] = triangles[i];                    // X unchanged
+                centeredTriangles[i + 1] = triangles[i + 1] - centerY;  // Center Y
+                centeredTriangles[i + 2] = triangles[i + 2] - centerZ;  // Center Z
+            }
+            // Recalculate bounds after centering
+            bounds = this.#calculateBounds(centeredTriangles);
+        }
+
+        const maxRadius = this.#calculateMaxRadius(centeredTriangles);
 
         // Calculate tool width for radial strips
         const toolBounds = toolData.bounds;
@@ -452,10 +485,10 @@ export class RasterPath {
             Math.abs(toolBounds.max.x - toolBounds.min.x)
         ) * this.resolution;
 
-        // Build X-bucketing data
+        // Build X-bucketing data - full 360° rotation
         const numAngles = Math.ceil(360 / this.rotationStep);
         const bucketWidth = 2.0; // mm - tune this for performance
-        const bucketData = this.#bucketTrianglesByX(triangles, bounds, bucketWidth);
+        const bucketData = this.#bucketTrianglesByX(centeredTriangles, bounds, bucketWidth);
 
         return new Promise((resolve, reject) => {
             // Setup progress handler
@@ -479,7 +512,7 @@ export class RasterPath {
             this.#sendMessage(
                 'radial-generate-toolpaths',
                 {
-                    triangles,
+                    triangles: centeredTriangles,
                     bucketData,
                     toolData,
                     resolution: this.resolution,

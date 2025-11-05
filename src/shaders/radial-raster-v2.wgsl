@@ -85,9 +85,8 @@ fn ray_triangle_intersect(
     let t = f * dot(edge2, q);
 
     if (t > EPSILON) {
-        // Intersection found - calculate Z coordinate
-        let intersection_point = ray_origin + ray_dir * t;
-        return vec2<f32>(1.0, intersection_point.z);
+        // Intersection found - return distance along ray (t parameter)
+        return vec2<f32>(1.0, t);
     }
 
     return vec2<f32>(0.0, 0.0);
@@ -117,23 +116,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let grid_x = bucket_min_grid_x + local_x;
         let world_x = uniforms.global_min_x + f32(grid_x) * uniforms.resolution;
 
-        // Calculate ray origin (on rotated plane, offset from model)
-        let radial_dist = uniforms.max_radius - f32(grid_y) * uniforms.resolution;
-        let ray_origin_y = radial_dist * cos(angle);
-        let ray_origin_z = radial_dist * sin(angle);
-        let ray_origin = vec3<f32>(world_x, ray_origin_y, ray_origin_z);
+        // Rotating top-down scan: normal XY planar scan, rotated around X-axis
+        // Step 1: Define scan position in planar frame (X, Y, Z_above)
+        let scan_x = world_x;
+        let scan_y = f32(grid_y) * uniforms.resolution - uniforms.tool_width / 2.0;
+        let scan_z = uniforms.max_radius;  // Start above the model
 
-        // Ray direction: radially inward toward X-axis
-        let ray_dir = vec3<f32>(0.0, -cos(angle), -sin(angle));
+        // Step 2: Rotate position (scan_x, scan_y, scan_z) around X-axis by 'angle'
+        // X stays the same, rotate YZ plane: y' = y*cos - z*sin, z' = y*sin + z*cos
+        let ray_origin_x = scan_x;
+        let ray_origin_y = scan_y * cos(angle) - scan_z * sin(angle);
+        let ray_origin_z = scan_y * sin(angle) + scan_z * cos(angle);
+        let ray_origin = vec3<f32>(ray_origin_x, ray_origin_y, ray_origin_z);
 
-        // Initialize best_z based on filter mode
-        var best_z: f32;
-        if (uniforms.filter_mode == 0u) {
-            best_z = uniforms.z_floor;  // Terrain: keep highest Z
-        } else {
-            best_z = 1e10;              // Tool: keep lowest Z
-        }
+        // Step 3: Rotate ray direction (0, 0, -1) around X-axis by 'angle'
+        // X component stays 0, rotate YZ: dy = 0*cos - (-1)*sin = sin, dz = 0*sin + (-1)*cos = -cos
+        let ray_dir = vec3<f32>(0.0, sin(angle), -cos(angle));
 
+        // Initialize best distance (closest hit)
+        var best_t: f32 = 1e10;  // Start with very large distance
         var found = false;
 
         // Ray-cast against triangles in this bucket
@@ -160,21 +161,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
             let result = ray_triangle_intersect(ray_origin, ray_dir, v0, v1, v2);
             let hit = result.x;
-            let intersection_z = result.y;
+            let t = result.y;  // Distance along ray
 
             if (hit > 0.5) {
-                if (uniforms.filter_mode == 0u) {
-                    // Terrain: keep highest
-                    if (intersection_z > best_z) {
-                        best_z = intersection_z;
-                        found = true;
-                    }
-                } else {
-                    // Tool: keep lowest
-                    if (intersection_z < best_z) {
-                        best_z = intersection_z;
-                        found = true;
-                    }
+                // Keep closest hit (minimum t)
+                if (t < best_t) {
+                    best_t = t;
+                    found = true;
                 }
             }
         }
@@ -190,7 +183,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                        + local_x;
 
         if (found) {
-            output[output_idx] = best_z;
+            // Terrain height = distance from scan origin minus ray travel distance
+            // Ray started at max_radius from X-axis, traveled best_t distance to hit
+            let terrain_height = uniforms.max_radius - best_t;
+            output[output_idx] = terrain_height;
         } else {
             output[output_idx] = uniforms.z_floor;
         }

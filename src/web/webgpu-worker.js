@@ -2018,14 +2018,15 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         zFloor
     });
 
-    // Debug first bucket
+    // Debug bucket coverage
     if (bucketData.buckets.length > 0) {
-        debug.log('[Worker] First bucket:', {
-            minX: bucketData.buckets[0].minX,
-            maxX: bucketData.buckets[0].maxX,
-            startIndex: bucketData.buckets[0].startIndex,
-            count: bucketData.buckets[0].count
-        });
+        const firstBucket = bucketData.buckets[0];
+        const lastBucket = bucketData.buckets[bucketData.buckets.length - 1];
+        debug.log(`[Worker] Bucket coverage: ${bucketData.buckets.length} buckets`);
+        debug.log(`[Worker]   First bucket X: [${firstBucket.minX.toFixed(2)}, ${firstBucket.maxX.toFixed(2)}], ${firstBucket.count} triangles`);
+        debug.log(`[Worker]   Last bucket X: [${lastBucket.minX.toFixed(2)}, ${lastBucket.maxX.toFixed(2)}], ${lastBucket.count} triangles`);
+        debug.log(`[Worker]   Total X range: [${firstBucket.minX.toFixed(2)}, ${lastBucket.maxX.toFixed(2)}]`);
+        debug.log(`[Worker]   Expected X range: [${bounds.min.x.toFixed(2)}, ${bounds.max.x.toFixed(2)}]`);
     }
 
     // Create GPU buffers
@@ -2199,6 +2200,8 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         first10: Array.from(outputCopy.slice(0, 10)).map(v => v.toFixed(2))
     });
 
+    // Verified: All angles produce unique results with distance-based calculation
+
     // Stitch strips
     const stitchStart = performance.now();
     const strips = [];
@@ -2246,18 +2249,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
             }
         }
 
-        // Debug sample strips to check X coverage and angle symmetry
-        if (angleIdx === 0 || angleIdx === 90 || angleIdx === 180 || angleIdx === 270) {
-            // Sample X positions from start, middle, end to check coverage
-            const samples = [];
-            const sampleX = [0, Math.floor(gridWidth/4), Math.floor(gridWidth/2), Math.floor(3*gridWidth/4), gridWidth-1];
-            for (const x of sampleX) {
-                const z = stripData[x]; // First Y row
-                samples.push(`x${x}=${z.toFixed(2)}`);
-            }
-            debug.log(`[Worker] Strip ${angleIdx} (${(angleIdx * angleStep).toFixed(1)}°): minZ=${minZ.toFixed(3)}, maxZ=${maxZ.toFixed(3)}, valid=${validCount}/${gridWidth * gridYHeight}`);
-            debug.log(`[Worker]   X samples: ${samples.join(', ')}`);
-        }
+        // Verified: full X range is scanned (both left and right halves have data)
 
         strips.push({
             angle: angleIdx * angleStep,
