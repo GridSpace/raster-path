@@ -992,6 +992,10 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputSize * 4);
 
     device.queue.submit([commandEncoder.finish()]);
+
+    // CRITICAL: Wait for GPU to finish before reading results
+    await device.queue.onSubmittedWorkDone();
+
     await stagingBuffer.mapAsync(GPUMapMode.READ);
 
     const outputData = new Float32Array(stagingBuffer.getMappedRange());
@@ -1141,6 +1145,10 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
     commandEncoder.copyBufferToBuffer(buffers.outputBuffer, 0, buffers.stagingBuffer, 0, outputSize * 4);
 
     device.queue.submit([commandEncoder.finish()]);
+
+    // CRITICAL: Wait for GPU to finish before reading results
+    await device.queue.onSubmittedWorkDone();
+
     await buffers.stagingBuffer.mapAsync(GPUMapMode.READ);
 
     const outputData = new Float32Array(buffers.stagingBuffer.getMappedRange().slice(0, outputSize * 4));
