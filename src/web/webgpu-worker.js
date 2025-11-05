@@ -2078,12 +2078,13 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     });
 
     // CRITICAL: Initialize output buffer with zFloor to avoid reading garbage data
-    // GPU buffers contain random values by default!
+    // Use mappedAtCreation for deterministic initialization (not writeBuffer!)
+    const initEncoder = device.createCommandEncoder();
     const initData = new Float32Array(outputSize / 4);
     initData.fill(zFloor);
     device.queue.writeBuffer(outputBuffer, 0, initData);
-
-    // CRITICAL: Wait for buffer initialization to complete before compute dispatch
+    // Force initialization to complete
+    device.queue.submit([initEncoder.finish()]);
     await device.queue.onSubmittedWorkDone();
 
     // Create uniforms with proper alignment (f32 and u32 mixed)
@@ -2136,6 +2137,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         ]
     });
 
+    console.time('RADIAL COMPUTE');
     // Dispatch
     const commandEncoder = device.createCommandEncoder();
     const passEncoder = commandEncoder.beginComputePass();
@@ -2146,6 +2148,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const dispatchX = Math.ceil(numAngles / 8);
     const dispatchY = Math.ceil(gridYHeight / 8);
     const dispatchZ = bucketData.numBuckets;
+    debug.log({ dispatchX, dispatchY, dispatchZ });
 
     passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
     passEncoder.end();
@@ -2161,6 +2164,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
 
     // CRITICAL: Wait for GPU to finish before reading results
     await device.queue.onSubmittedWorkDone();
+    console.timeEnd('RADIAL COMPUTE');
 
     await stagingBuffer.mapAsync(GPUMapMode.READ);
     const outputData = new Float32Array(stagingBuffer.getMappedRange());
@@ -2177,6 +2181,23 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
 
     const gpuTime = performance.now() - startTime;
     debug.log('[Worker] GPU rasterization complete:', gpuTime.toFixed(1), 'ms');
+
+    // Debug: Check output buffer for uniqueness
+    let minZ = Infinity, maxZ = -Infinity, numNonFloor = 0;
+    for (let i = 0; i < outputCopy.length; i++) {
+        if (outputCopy[i] !== zFloor) {
+            minZ = Math.min(minZ, outputCopy[i]);
+            maxZ = Math.max(maxZ, outputCopy[i]);
+            numNonFloor++;
+        }
+    }
+    debug.log('[Worker] Output buffer stats:', {
+        totalCells: outputCopy.length,
+        nonFloorCells: numNonFloor,
+        minZ: minZ.toFixed(3),
+        maxZ: maxZ.toFixed(3),
+        first10: Array.from(outputCopy.slice(0, 10)).map(v => v.toFixed(2))
+    });
 
     // Stitch strips
     const stitchStart = performance.now();
@@ -2210,23 +2231,24 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         // NOTE: Must use world coordinates, not grid indices, for toolpath generator
         const sparsePositions = [];
         let minZ = Infinity, maxZ = -Infinity;
+        let validCount = 0;
         for (let y = 0; y < gridYHeight; y++) {
             for (let x = 0; x < gridWidth; x++) {
                 const z = stripData[y * gridWidth + x];
                 minZ = Math.min(minZ, z);
                 maxZ = Math.max(maxZ, z);
-                if (z > zFloor + 0.001) {  // Valid data
-                    // Convert grid indices to world coordinates
-                    const worldX = bounds.min.x + x * resolution;
-                    const worldY = y * resolution;  // Y is 0 to toolWidth
-                    sparsePositions.push(worldX, worldY, z);
-                }
+                // Include ALL cells - let toolpath generator decide what's valid
+                // Convert grid indices to world coordinates
+                const worldX = bounds.min.x + x * resolution;
+                const worldY = y * resolution;  // Y is 0 to toolWidth
+                sparsePositions.push(worldX, worldY, z);
+                if (z !== zFloor) validCount++;
             }
         }
 
         // Debug first strip
         if (angleIdx === 0) {
-            debug.log(`[Worker] Strip 0: minZ=${minZ.toFixed(3)}, maxZ=${maxZ.toFixed(3)}, zFloor=${zFloor}, valid=${sparsePositions.length / 3}/${gridWidth * gridYHeight}`);
+            debug.log(`[Worker] Strip 0: minZ=${minZ.toFixed(3)}, maxZ=${maxZ.toFixed(3)}, zFloor=${zFloor}, valid=${validCount}/${gridWidth * gridYHeight}`);
         }
 
         strips.push({
