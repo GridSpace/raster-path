@@ -960,8 +960,6 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     const numScanlines = Math.ceil(terrainMapData.height / yStep);
     const outputSize = pointsPerLine * numScanlines;
 
-    debug.log(`Output: ${pointsPerLine}x${numScanlines} = ${outputSize} points`);
-
     const outputBuffer = device.createBuffer({
         size: outputSize * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -1035,12 +1033,6 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
     stagingBuffer.destroy();
 
     const endTime = performance.now();
-    debug.log(`Toolpath complete in ${(endTime - startTime).toFixed(1)}ms`);
-    debug.log(`Output: ${result.length} values (${numScanlines} scanlines × ${pointsPerLine} points)`);
-
-    // Log sample of output for debugging
-    const sampleSize = Math.min(10, result.length);
-    debug.log(`First ${sampleSize} values:`, Array.from(result.slice(0, sampleSize)));
 
     return {
         pathData: result,
@@ -2384,6 +2376,8 @@ self.onmessage = async function(e) {
                 debug.log(`[Worker] Rasterized ${radialModelResult.strips.length} strips`);
 
                 // Step 2: Generate toolpath for each strip
+                const toolpathStartTime = performance.now();
+
                 // Create sparse tool representation ONCE (same for all strips)
                 const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
                 debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
@@ -2431,14 +2425,10 @@ self.onmessage = async function(e) {
                     });
 
                     totalToolpathPoints += stripToolpathResult.pathData.length;
-
-                    // Only log first, middle, last strips to reduce spam
-                    if (i < 3 || i === Math.floor(radialModelResult.strips.length / 2) || i >= radialModelResult.strips.length - 3) {
-                        debug.log(`[Worker] Strip ${i} (${strip.angle.toFixed(1)}°): ${stripToolpathResult.pathData.length} toolpath points`);
-                    }
                 }
 
-                debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points`);
+                const toolpathTotalTime = performance.now() - toolpathStartTime;
+                debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points in ${toolpathTotalTime.toFixed(0)}ms`);
 
                 // Transfer all strip toolpath buffers AND terrain strip buffers
                 const toolpathTransferBuffers = stripToolpaths.map(strip => strip.pathData.buffer);
