@@ -2382,39 +2382,54 @@ self.onmessage = async function(e) {
                 const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
                 debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
 
+                // Find maximum strip dimensions for buffer sizing
+                let maxStripWidth = 0;
+                let maxStripHeight = 0;
+                for (const strip of radialModelResult.strips) {
+                    maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
+                    maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
+                }
+
+                // Create reusable GPU buffers ONCE for all strips
+                const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, radialYStep);
+                debug.log(`[Worker] Created reusable GPU buffers for ${maxStripWidth}x${maxStripHeight} strips`);
+
                 const stripToolpaths = [];
                 let totalToolpathPoints = 0;
 
+                // Process strips sequentially with reusable buffers
                 for (let i = 0; i < radialModelResult.strips.length; i++) {
                     const strip = radialModelResult.strips[i];
 
-                    // Report progress
-                    self.postMessage({
-                        type: 'toolpath-progress',
-                        data: {
-                            percent: Math.round(((i + 1) / radialModelResult.strips.length) * 100),
-                            current: i + 1,
-                            total: radialModelResult.strips.length,
-                            layer: i + 1
-                        }
-                    });
+                    // Report progress every 10 strips to reduce overhead
+                    if (i % 10 === 0 || i === radialModelResult.strips.length - 1) {
+                        self.postMessage({
+                            type: 'toolpath-progress',
+                            data: {
+                                percent: Math.round(((i + 1) / radialModelResult.strips.length) * 100),
+                                current: i + 1,
+                                total: radialModelResult.strips.length,
+                                layer: i + 1
+                            }
+                        });
+                    }
 
                     // Skip empty strips (no terrain points)
                     if (!strip.positions || strip.positions.length === 0) {
-                        // Don't log every empty strip - too verbose
                         continue;
                     }
 
-                    // Generate toolpath for this strip (single scanline) with pre-created sparse tool
-                    const stripToolpathResult = await generateToolpathWithSparseTools(
+                    // Generate toolpath using reusable buffers (sequential but fast)
+                    const stripStartTime = performance.now();
+                    const stripToolpathResult = await runToolpathComputeWithBuffers(
                         strip.positions,
-                        sparseToolData,
+                        strip.gridWidth,
+                        strip.gridHeight,
                         radialXStep,
                         radialYStep,
                         radialToolpathZFloor,
-                        radialGridStep,
-                        strip.bounds,
-                        true  // singleScanline = true
+                        reusableBuffers,
+                        stripStartTime
                     );
 
                     stripToolpaths.push({
@@ -2426,6 +2441,9 @@ self.onmessage = async function(e) {
 
                     totalToolpathPoints += stripToolpathResult.pathData.length;
                 }
+
+                // Cleanup reusable buffers
+                destroyReusableToolpathBuffers(reusableBuffers);
 
                 const toolpathTotalTime = performance.now() - toolpathStartTime;
                 debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points in ${toolpathTotalTime.toFixed(0)}ms`);
