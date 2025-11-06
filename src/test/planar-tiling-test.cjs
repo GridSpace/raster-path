@@ -111,12 +111,13 @@ function createWindow() {
                 console.log('\\n1. Rasterizing model (should use tiling)...');
                 const t0 = performance.now();
                 let terrainData;
+                let terrainTime;
                 try {
                     terrainData = await raster.rasterizeModel({
                         triangles: terrainTriangles,
                         zFloor: zFloor
                     });
-                    const terrainTime = performance.now() - t0;
+                    terrainTime = performance.now() - t0;
                     console.log('✓ Model:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
                 } catch (error) {
                     console.error('❌ Model rasterization FAILED:', error.message);

@@ -799,15 +799,28 @@ function displayToolRaster() {
 function displayToolpaths(wrapped) {
     if (!toolpathData) return;
 
-    const positions = [];
-    const colors = [];
-
     if (mode === 'planar') {
         // Planar toolpaths
         const { pathData, numScanlines, pointsPerLine } = toolpathData;
         const bounds = toolpathData.generationBounds || modelRasterData.bounds;
         const stepSize = resolution;
 
+        const totalPoints = numScanlines * pointsPerLine;
+        const MAX_DISPLAY_POINTS = 10000000; // 10M points max for display
+
+        // Check if we need to downsample
+        if (totalPoints > MAX_DISPLAY_POINTS) {
+            console.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
+            console.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
+            console.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
+            return;
+        }
+
+        // Preallocate typed arrays for better performance
+        const positions = new Float32Array(totalPoints * 3);
+        const colors = new Float32Array(totalPoints * 3);
+
+        let arrayIdx = 0;
         for (let line = 0; line < numScanlines; line++) {
             for (let pt = 0; pt < pointsPerLine; pt++) {
                 const idx = line * pointsPerLine + pt;
@@ -816,109 +829,168 @@ function displayToolpaths(wrapped) {
                 const x = bounds.min.x + pt * xStep * stepSize;
                 const y = bounds.min.y + line * yStep * stepSize;
 
-                positions.push(x, y, z);
-                colors.push(1, 0.4, 0);  // Orange
+                positions[arrayIdx] = x;
+                positions[arrayIdx + 1] = y;
+                positions[arrayIdx + 2] = z;
+
+                colors[arrayIdx] = 1;      // R
+                colors[arrayIdx + 1] = 0.4; // G
+                colors[arrayIdx + 2] = 0;   // B
+
+                arrayIdx += 3;
             }
         }
 
-    } else {
-        // Radial V2 toolpaths - each strip is independent
-        const { strips } = toolpathData;
-        const stepSize = resolution;
+        // Create geometry from preallocated arrays
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-        console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips');
+        const material = new THREE.PointsMaterial({
+            size: resolution * 0.5,
+            vertexColors: true
+        });
 
-        // DEBUG: Check angle distribution AND data
-        if (strips.length > 0) {
-            const angleChecks = [0, 180, 359, 360, 361, 540, 719].filter(i => i < strips.length);
-            console.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
-            // Check if pathData is actually different between strips
-            if (strips.length > 360) {
-                const samples0 = strips[0].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
-                const samples360 = strips[360].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
-                console.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
-                console.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
-                console.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
-            }
+        toolpathPoints = new THREE.Points(geometry, material);
+        rotatedGroup.add(toolpathPoints);
+
+        return; // Exit early for planar mode
+
+    }
+
+    // Radial V2 toolpaths - each strip is independent
+    const { strips } = toolpathData;
+    const stepSize = resolution;
+
+    // Calculate total points across all strips
+    let totalPoints = 0;
+    for (const strip of strips) {
+        totalPoints += strip.numScanlines * strip.pointsPerLine;
+    }
+
+    const MAX_DISPLAY_POINTS = 10000000; // 10M points max for display
+
+    console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips,', totalPoints, 'total points');
+
+    // Check if we need to skip visualization
+    if (totalPoints > MAX_DISPLAY_POINTS) {
+        console.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
+        console.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
+        console.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
+        return;
+    }
+
+    // DEBUG: Check angle distribution AND data
+    if (strips.length > 0) {
+        const angleChecks = [0, 180, 359, 360, 361, 540, 719].filter(i => i < strips.length);
+        console.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
+        // Check if pathData is actually different between strips
+        if (strips.length > 360) {
+            const samples0 = strips[0].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
+            const samples360 = strips[360].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
+            console.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
+            console.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
+            console.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
+        }
+    }
+
+    if (strips.length > 0) {
+        const firstStrip = strips[0];
+        // Note: modelRasterData may be null with new pipeline (rasterize + toolpath in one step)
+        const terrainStrip = modelRasterData ? modelRasterData.find(s => s.angle === firstStrip.angle) : null;
+
+        // Find min/max without stack overflow
+        let minVal = Infinity, maxVal = -Infinity;
+        for (let i = 0; i < firstStrip.pathData.length; i++) {
+            minVal = Math.min(minVal, firstStrip.pathData[i]);
+            maxVal = Math.max(maxVal, firstStrip.pathData[i]);
         }
 
-        if (strips.length > 0) {
-            const firstStrip = strips[0];
-            // Note: modelRasterData may be null with new pipeline (rasterize + toolpath in one step)
-            const terrainStrip = modelRasterData ? modelRasterData.find(s => s.angle === firstStrip.angle) : null;
+        console.log('[Toolpath Display] First strip sample:', {
+            angle: firstStrip.angle,
+            numScanlines: firstStrip.numScanlines,
+            pointsPerLine: firstStrip.pointsPerLine,
+            firstValues: Array.from(firstStrip.pathData.slice(0, 10)),
+            minValue: minVal,
+            maxValue: maxVal,
+            terrainBounds: terrainStrip?.bounds
+        });
+    }
 
-            // Find min/max without stack overflow
-            let minVal = Infinity, maxVal = -Infinity;
-            for (let i = 0; i < firstStrip.pathData.length; i++) {
-                minVal = Math.min(minVal, firstStrip.pathData[i]);
-                maxVal = Math.max(maxVal, firstStrip.pathData[i]);
-            }
+    // Preallocate typed arrays for better performance
+    const positions = new Float32Array(totalPoints * 3);
+    const colors = new Float32Array(totalPoints * 3);
+    let arrayIdx = 0;
 
-            console.log('[Toolpath Display] First strip sample:', {
-                angle: firstStrip.angle,
-                numScanlines: firstStrip.numScanlines,
-                pointsPerLine: firstStrip.pointsPerLine,
-                firstValues: Array.from(firstStrip.pathData.slice(0, 10)),
-                minValue: minVal,
-                maxValue: maxVal,
-                terrainBounds: terrainStrip?.bounds
-            });
-        }
+    if (wrapped) {
+        // Wrap each strip around X-axis at its angle
+        // Each strip should have numScanlines=1 (single centerline)
+        for (const strip of strips) {
+            const { angle, pathData, numScanlines, pointsPerLine } = strip;
+            const terrainStrip = modelRasterData.find(s => s.angle === angle);
+            const stripBounds = terrainStrip?.bounds || { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
 
-        if (wrapped) {
-            // Wrap each strip around X-axis at its angle
-            // Each strip should have numScanlines=1 (single centerline)
-            for (const strip of strips) {
-                const { angle, pathData, numScanlines, pointsPerLine } = strip;
-                const terrainStrip = modelRasterData.find(s => s.angle === angle);
-                const stripBounds = terrainStrip?.bounds || { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
+            // Rotate around X-axis at this angle
+            const theta = angle * Math.PI / 180;
+            const cosTheta = Math.cos(theta);
+            const sinTheta = Math.sin(theta);
 
-                // Rotate around X-axis at this angle
-                const theta = angle * Math.PI / 180;
-                const cosTheta = Math.cos(theta);
-                const sinTheta = Math.sin(theta);
+            // Should only be 1 scanline for radial
+            for (let line = 0; line < numScanlines; line++) {
+                for (let pt = 0; pt < pointsPerLine; pt++) {
+                    const idx = line * pointsPerLine + pt;
+                    const radius = pathData[idx];  // Tool tip radius from X-axis
 
-                // Should only be 1 scanline for radial
-                for (let line = 0; line < numScanlines; line++) {
-                    for (let pt = 0; pt < pointsPerLine; pt++) {
-                        const idx = line * pointsPerLine + pt;
-                        const radius = pathData[idx];  // Tool tip radius from X-axis
+                    const gridX = pt * xStep;
+                    const x = stripBounds.min.x + gridX * stepSize;
 
-                        const gridX = pt * xStep;
-                        const x = stripBounds.min.x + gridX * stepSize;
+                    // Wrap around X-axis
+                    const yWrapped = radius * cosTheta;
+                    const zWrapped = radius * sinTheta;
 
-                        // Wrap around X-axis
-                        const yWrapped = radius * cosTheta;
-                        const zWrapped = radius * sinTheta;
+                    // Use direct indexing instead of push()
+                    positions[arrayIdx] = x;
+                    positions[arrayIdx + 1] = yWrapped;
+                    positions[arrayIdx + 2] = zWrapped;
 
-                        positions.push(x, yWrapped, zWrapped);
-                        colors.push(1, 0.4, 0);  // Orange
-                    }
+                    colors[arrayIdx] = 1;      // R
+                    colors[arrayIdx + 1] = 0.4; // G
+                    colors[arrayIdx + 2] = 0;   // B
+
+                    arrayIdx += 3;
                 }
             }
-        } else {
-            // Show unwrapped (not very useful for radial, but supported)
-            for (const strip of strips) {
-                const { angle, pathData, numScanlines, pointsPerLine } = strip;
-                // Get bounds from the strip's terrain data (or use default if not available)
-                const stripBounds = (modelRasterData && modelRasterData.find(s => s.angle === angle)?.bounds) ||
-                                  { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
-                const yOffset = angle; // Use angle as Y offset for visualization
+        }
+    } else {
+        // Show unwrapped (not very useful for radial, but supported)
+        for (const strip of strips) {
+            const { angle, pathData, numScanlines, pointsPerLine } = strip;
+            // Get bounds from the strip's terrain data (or use default if not available)
+            const stripBounds = (modelRasterData && modelRasterData.find(s => s.angle === angle)?.bounds) ||
+                              { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
+            const yOffset = angle; // Use angle as Y offset for visualization
 
-                for (let line = 0; line < numScanlines; line++) {
-                    const gridY = line * yStep;
-                    const y = yOffset + gridY * stepSize;
+            for (let line = 0; line < numScanlines; line++) {
+                const gridY = line * yStep;
+                const y = yOffset + gridY * stepSize;
 
-                    for (let pt = 0; pt < pointsPerLine; pt++) {
-                        const idx = line * pointsPerLine + pt;
-                        const radius = pathData[idx];
+                for (let pt = 0; pt < pointsPerLine; pt++) {
+                    const idx = line * pointsPerLine + pt;
+                    const radius = pathData[idx];
 
-                        const gridX = pt * xStep;
-                        const x = stripBounds.min.x + gridX * stepSize;
+                    const gridX = pt * xStep;
+                    const x = stripBounds.min.x + gridX * stepSize;
 
-                        positions.push(x, y, radius);
-                        colors.push(1, 0.4, 0);  // Orange
-                    }
+                    // Use direct indexing instead of push()
+                    positions[arrayIdx] = x;
+                    positions[arrayIdx + 1] = y;
+                    positions[arrayIdx + 2] = radius;
+
+                    colors[arrayIdx] = 1;      // R
+                    colors[arrayIdx + 1] = 0.4; // G
+                    colors[arrayIdx + 2] = 0;   // B
+
+                    arrayIdx += 3;
                 }
             }
         }
