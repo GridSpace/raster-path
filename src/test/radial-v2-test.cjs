@@ -184,10 +184,23 @@ function createWindow() {
                     }
                 }
 
-                // Step 3: Toolpath generation - temporarily disabled while debugging
-                console.log('\\n3. Toolpath generation - skipped (rasterization verified)');
-                const toolpathTime = 0;
-                const toolpathData = { numStrips: 0, totalPoints: 0 };
+                // Step 3: Generate toolpaths for each strip
+                console.log('\\n3. Generating toolpaths...');
+                const t2 = performance.now();
+                const toolpathResult = await raster.generateToolpathsRadial({
+                    strips: strips,
+                    toolData: toolData,
+                    xStep: xStep,
+                    yStep: yStep,
+                    zFloor: zFloor
+                });
+                const toolpathTime = performance.now() - t2;
+                console.log('✓ Toolpaths generated:', toolpathResult.strips.length, 'strips in', toolpathTime.toFixed(1), 'ms');
+
+                const toolpathData = {
+                    numStrips: toolpathResult.strips.length,
+                    totalPoints: toolpathResult.totalPoints
+                };
 
                 // Cleanup
                 raster.terminate();
@@ -254,6 +267,7 @@ function createWindow() {
                 console.error('\\n⚠️  WARNING: No toolpath points generated!');
                 app.exit(1);
             } else {
+                console.log('\\n✅ All checks passed!');
                 app.exit(0);
             }
 

@@ -974,6 +974,7 @@ async function runToolpathCompute(terrainMapData, sparseToolData, xStep, yStep, 
         0,
         pointsPerLine,
         numScanlines,
+        0,  // y_offset (default 0 for planar mode)
     ]);
     const uniformDataFloat = new Float32Array(uniformData.buffer);
     uniformDataFloat[5] = oobZ;
@@ -1080,7 +1081,7 @@ function createReusableToolpathBuffers(terrainWidth, terrainHeight, sparseToolDa
 
     // Create uniform buffer (will be updated for each tile)
     const uniformBuffer = device.createBuffer({
-        size: 32,
+        size: 36,  // 9 fields × 4 bytes (added y_offset field)
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -1122,6 +1123,10 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
     const numScanlines = Math.ceil(terrainHeight / yStep);
     const outputSize = pointsPerLine * numScanlines;
 
+    // Calculate Y offset for single-scanline radial mode
+    // When numScanlines=1 and terrainHeight > 1, center the tool at the midline
+    const yOffset = (numScanlines === 1 && terrainHeight > 1) ? Math.floor(terrainHeight / 2) : 0;
+
     // Update uniforms for this tile
     const uniformData = new Uint32Array([
         terrainWidth,
@@ -1132,6 +1137,7 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
         0,
         pointsPerLine,
         numScanlines,
+        yOffset,  // y_offset for radial single-scanline mode
     ]);
     const uniformDataFloat = new Float32Array(uniformData.buffer);
     uniformDataFloat[5] = oobZ;
@@ -1216,17 +1222,8 @@ async function generateToolpath(terrainPoints, toolPoints, xStep, yStep, oobZ, g
         };
     }
 
-    // If singleScanline mode, override bounds to force centerline only
-    if (singleScanline) {
-        // For radial mode: Y=0 is the X-axis itself (radius=0)
-        // The tool centerline should scan at Y=0, not at the midpoint
-        const centerY = terrainBounds.min.y;  // Use min.y which should be 0
-        terrainBounds = {
-            min: { ...terrainBounds.min, y: centerY },
-            max: { ...terrainBounds.max, y: centerY }
-        };
-        debug.log('[Toolpath] Single scanline mode: forcing centerline at Y =', centerY.toFixed(3));
-    }
+    // Note: singleScanline mode means OUTPUT only centerline, but terrain bounds stay full
+    // This ensures all terrain Y values contribute to tool interference at the centerline
 
     // Debug tool bounds and center
     for (let i=0; i<toolPoints.length; i += 3) {
@@ -2022,7 +2019,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const gridWidth = Math.ceil((bucketMaxX - bucketMinX) / resolution);
     const gridYHeight = Math.ceil(toolWidth / resolution);
     const bucketGridWidth = Math.ceil((bucketData.buckets[0].maxX - bucketData.buckets[0].minX) / resolution);
-
+console.log({ toolWidth });
     // Calculate workgroup load distribution for timeout analysis
     const bucketTriangleCounts = bucketData.buckets.map(b => b.count);
     const minTriangles = Math.min(...bucketTriangleCounts);
@@ -2391,8 +2388,9 @@ self.onmessage = async function(e) {
                 }
 
                 // Create reusable GPU buffers ONCE for all strips
-                const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, radialYStep);
-                debug.log(`[Worker] Created reusable GPU buffers for ${maxStripWidth}x${maxStripHeight} strips`);
+                // For radial mode: pass maxStripHeight as yStep to ensure single-scanline output buffers
+                const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
+                debug.log(`[Worker] Created reusable GPU buffers for ${maxStripWidth}x${maxStripHeight} terrain (1 scanline output)`);
 
                 const stripToolpaths = [];
                 let totalToolpathPoints = 0;
@@ -2420,13 +2418,15 @@ self.onmessage = async function(e) {
                     }
 
                     // Generate toolpath using reusable buffers (sequential but fast)
+                    // For radial mode: yStep = gridHeight ensures single centerline scanline output
+                    // (numScanlines = ceil(gridHeight / yStep) = ceil(gridHeight / gridHeight) = 1)
                     const stripStartTime = performance.now();
                     const stripToolpathResult = await runToolpathComputeWithBuffers(
                         strip.positions,
                         strip.gridWidth,
                         strip.gridHeight,
                         radialXStep,
-                        radialYStep,
+                        strip.gridHeight,  // Force yStep = gridHeight for single-scanline output
                         radialToolpathZFloor,
                         reusableBuffers,
                         stripStartTime

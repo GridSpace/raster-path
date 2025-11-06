@@ -379,51 +379,44 @@ export class RasterPath {
             throw new Error('generateToolpathsRadial() only works in radial mode');
         }
 
-        // Process each strip through planar toolpath generator
-        const stripToolpaths = [];
-        let totalPoints = 0;
-
-        for (let i = 0; i < strips.length; i++) {
-            const strip = strips[i];
-
-            // Skip empty strips
-            if (strip.pointCount === 0 || !strip.positions || strip.positions.length === 0) {
-                if (onProgress) {
-                    onProgress(i + 1, strips.length);
+        // Use worker's optimized batch radial toolpath processing
+        // This creates sparse tool once and reuses GPU buffers for all strips
+        return new Promise((resolve, reject) => {
+            const messageHandler = (e) => {
+                if (e.data.type === 'toolpath-complete') {
+                    this.worker.removeEventListener('message', messageHandler);
+                    this.worker.removeEventListener('message', progressHandler);
+                    resolve(e.data.result);
+                } else if (e.data.type === 'error') {
+                    this.worker.removeEventListener('message', messageHandler);
+                    this.worker.removeEventListener('message', progressHandler);
+                    reject(new Error(e.data.error));
                 }
-                continue;
-            }
+            };
 
-            // For radial, we want a single scanline down the center of the strip
-            // Use singleScanline flag to force centerline-only processing
-            const toolpathResult = await this.#generateToolpathsPlanar({
-                terrainData: strip,
-                toolData,
-                xStep,
-                yStep,  // Ignored when singleScanline=true
-                zFloor,
-                onProgress: null, // Don't forward progress for individual strips
-                singleScanline: true  // Force single centerline scan
+            const progressHandler = (e) => {
+                if (e.data.type === 'toolpath-progress' && onProgress) {
+                    onProgress(e.data.data.current, e.data.data.total);
+                }
+            };
+
+            this.worker.addEventListener('message', messageHandler);
+            this.worker.addEventListener('message', progressHandler);
+
+            this.worker.postMessage({
+                type: 'generate-radial-toolpaths',
+                data: {
+                    modelResult: { strips },
+                    toolData,
+                    xStep,
+                    yStep,
+                    zFloor,
+                    resolution: this.resolution,
+                    bounds: toolData.bounds,
+                    gridStep: this.resolution
+                }
             });
-
-            stripToolpaths.push({
-                angle: strip.angle,
-                ...toolpathResult
-            });
-
-            totalPoints += toolpathResult.pathData.length;
-
-            // Report progress
-            if (onProgress) {
-                onProgress(i + 1, strips.length);
-            }
-        }
-
-        return {
-            strips: stripToolpaths,
-            totalPoints,
-            numStrips: strips.length
-        };
+        });
     }
 
     /**
@@ -470,12 +463,12 @@ export class RasterPath {
 
         const maxRadius = this.#calculateMaxRadius(centeredTriangles);
 
-        // Calculate tool width for radial strips
+        // Calculate tool width for radial strips (bounds are in mm, not grid cells)
         const toolBounds = toolData.bounds;
         const toolWidth = Math.max(
             Math.abs(toolBounds.max.y - toolBounds.min.y),
             Math.abs(toolBounds.max.x - toolBounds.min.x)
-        ) * this.resolution;
+        );
 
         // Build X-bucketing data - full 360° rotation
         const numAngles = Math.ceil(360 / this.rotationStep);
