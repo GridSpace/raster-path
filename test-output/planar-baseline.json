@@ -14,7 +14,7 @@
     "toolpathSize": 2249999,
     "numScanlines": 1499,
     "pointsPerLine": 1501,
-    "checksum": 799332063,
+    "checksum": -838563865,
     "sampleValues": [
       "-100.00",
       "-100.00",
@@ -49,9 +49,9 @@
     ]
   },
   "timing": {
-    "terrain": 67.7999997138977,
-    "tool": 4.700000286102295,
-    "toolpath": 184,
-    "total": 256.5
+    "terrain": 33.19999998807907,
+    "tool": 8.099999994039536,
+    "toolpath": 154.59999999403954,
+    "total": 195.89999997615814
   }
 }

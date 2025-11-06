@@ -1999,6 +1999,210 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
     };
 }
 
+// Radial V2: Streaming rasterizer with reusable GPU buffers
+// Processes strips one at a time with N operations in flight
+async function radialRasterizeStreaming(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds, onProgress) {
+    if (!device) {
+        throw new Error('WebGPU not initialized');
+    }
+
+    const timings = { start: performance.now() };
+    const bucketGridWidth = Math.ceil((bucketData.buckets[0].maxX - bucketData.buckets[0].minX) / resolution);
+    const bucketMinX = bucketData.buckets[0].minX;
+    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / resolution);
+    const gridYHeight = Math.ceil(toolWidth / resolution);
+    const outputSize = bucketData.numBuckets * bucketGridWidth * gridYHeight * 4;
+
+    // Create SHARED buffers (reused for all strips)
+    const triangleBuffer = device.createBuffer({
+        size: triangles.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+    });
+    new Float32Array(triangleBuffer.getMappedRange()).set(triangles);
+    triangleBuffer.unmap();
+
+    const bucketInfoSize = bucketData.buckets.length * 16;
+    const bucketInfoBuffer = device.createBuffer({
+        size: bucketInfoSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+    });
+    const bucketView = new ArrayBuffer(bucketInfoSize);
+    const bucketFloatView = new Float32Array(bucketView);
+    const bucketUintView = new Uint32Array(bucketView);
+    for (let i = 0; i < bucketData.buckets.length; i++) {
+        const bucket = bucketData.buckets[i];
+        const offset = i * 4;
+        bucketFloatView[offset] = bucket.minX;
+        bucketFloatView[offset + 1] = bucket.maxX;
+        bucketUintView[offset + 2] = bucket.startIndex;
+        bucketUintView[offset + 3] = bucket.count;
+    }
+    new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
+    bucketInfoBuffer.unmap();
+
+    const triangleIndicesBuffer = device.createBuffer({
+        size: bucketData.triangleIndices.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+    });
+    new Uint32Array(triangleIndicesBuffer.getMappedRange()).set(bucketData.triangleIndices);
+    triangleIndicesBuffer.unmap();
+
+    // Create shader and pipeline ONCE
+    const shaderModule = device.createShaderModule({ code: radialRasterizeV2ShaderCode });
+    const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: {
+            module: shaderModule,
+            entryPoint: 'main'
+        }
+    });
+
+    // Pool of reusable buffers (N in flight)
+    const POOL_SIZE = 4;
+    const bufferPool = [];
+    for (let i = 0; i < POOL_SIZE; i++) {
+        const outputBuffer = device.createBuffer({
+            size: outputSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+        });
+        const stagingBuffer = device.createBuffer({
+            size: outputSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
+        const uniformBuffer = device.createBuffer({
+            size: 48,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        bufferPool.push({ outputBuffer, stagingBuffer, uniformBuffer, inUse: false });
+    }
+
+    const strips = [];
+    const inFlight = [];
+
+    // Process all angles
+    for (let angleIdx = 0; angleIdx < numAngles; angleIdx++) {
+        const angle = angleIdx * angleStep;
+
+        // Wait for a buffer to become available
+        while (bufferPool.every(b => b.inUse)) {
+            await inFlight.shift();  // Wait for oldest operation
+        }
+
+        // Get available buffer from pool
+        const buffers = bufferPool.find(b => !b.inUse);
+        buffers.inUse = true;
+
+        // Update uniforms for this angle
+        const uniformView = new ArrayBuffer(48);
+        const floatView = new Float32Array(uniformView);
+        const uintView = new Uint32Array(uniformView);
+        floatView[0] = resolution;
+        floatView[1] = angle * (Math.PI / 180);
+        uintView[2] = 1;
+        floatView[3] = maxRadius;
+        floatView[4] = toolWidth;
+        uintView[5] = gridYHeight;
+        floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;
+        uintView[7] = bucketGridWidth;
+        floatView[8] = bucketMinX;
+        floatView[9] = zFloor;
+        uintView[10] = 0;
+        uintView[11] = bucketData.numBuckets;
+        device.queue.writeBuffer(buffers.uniformBuffer, 0, uniformView);
+
+        // Initialize output buffer
+        const initData = new Float32Array(outputSize / 4);
+        initData.fill(zFloor);
+        device.queue.writeBuffer(buffers.outputBuffer, 0, initData);
+
+        // Create bind group
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: triangleBuffer } },
+                { binding: 1, resource: { buffer: buffers.outputBuffer } },
+                { binding: 2, resource: { buffer: buffers.uniformBuffer } },
+                { binding: 3, resource: { buffer: bucketInfoBuffer } },
+                { binding: 4, resource: { buffer: triangleIndicesBuffer } }
+            ]
+        });
+
+        // Dispatch compute
+        const commandEncoder = device.createCommandEncoder();
+        const passEncoder = commandEncoder.beginComputePass();
+        passEncoder.setPipeline(pipeline);
+        passEncoder.setBindGroup(0, bindGroup);
+        passEncoder.dispatchWorkgroups(1, Math.ceil(gridYHeight / 8), bucketData.numBuckets);
+        passEncoder.end();
+        commandEncoder.copyBufferToBuffer(buffers.outputBuffer, 0, buffers.stagingBuffer, 0, outputSize);
+        device.queue.submit([commandEncoder.finish()]);
+
+        // Queue the readback (don't await yet)
+        const workPromise = (async () => {
+            await buffers.stagingBuffer.mapAsync(GPUMapMode.READ);
+            const outputData = new Float32Array(buffers.stagingBuffer.getMappedRange());
+
+            // Stitch strip from buckets
+            const stripData = new Float32Array(gridWidth * gridYHeight);
+            stripData.fill(zFloor);
+            for (let bucketIdx = 0; bucketIdx < bucketData.numBuckets; bucketIdx++) {
+                const bucket = bucketData.buckets[bucketIdx];
+                const bucketMinGridX = Math.floor((bucket.minX - bucketMinX) / resolution);
+                for (let localX = 0; localX < bucketGridWidth; localX++) {
+                    const gridX = bucketMinGridX + localX;
+                    if (gridX >= gridWidth) continue;
+                    for (let gridY = 0; gridY < gridYHeight; gridY++) {
+                        const srcIdx = bucketIdx * bucketGridWidth * gridYHeight + gridY * bucketGridWidth + localX;
+                        const dstIdx = gridY * gridWidth + gridX;
+                        stripData[dstIdx] = outputData[srcIdx];
+                    }
+                }
+            }
+
+            buffers.stagingBuffer.unmap();
+            buffers.inUse = false;
+
+            strips.push({
+                angle: angle,
+                gridWidth: gridWidth,
+                gridHeight: gridYHeight,
+                positions: stripData,
+                pointCount: stripData.filter(z => z > zFloor).length,
+                validPoints: stripData.filter(z => z > zFloor).length
+            });
+
+            if (onProgress && angleIdx % 10 === 0) {
+                onProgress(angleIdx + 1, numAngles);
+            }
+        })();
+
+        inFlight.push(workPromise);
+    }
+
+    // Wait for all remaining operations
+    await Promise.all(inFlight);
+
+    // Cleanup
+    triangleBuffer.destroy();
+    bucketInfoBuffer.destroy();
+    triangleIndicesBuffer.destroy();
+    for (const buffers of bufferPool) {
+        buffers.outputBuffer.destroy();
+        buffers.stagingBuffer.destroy();
+        buffers.uniformBuffer.destroy();
+    }
+
+    timings.gpu = performance.now() - timings.start;
+
+    return {
+        strips: strips.sort((a, b) => a.angle - b.angle),
+        timings: timings
+    };
+}
+
 // Radial V2: Rasterize model with rotating ray planes and X-bucketing
 async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds) {
     if (!device) {
@@ -2357,110 +2561,459 @@ self.onmessage = async function(e) {
 
                 debug.log('[Worker] Starting complete radial toolpath pipeline...');
 
-                // Step 1: Rasterize model (all strips)
-                const radialModelResult = await radialRasterizeV2(
-                    radialModelTriangles,
-                    radialBucketData,
-                    radialResolution,
-                    radialAngleStep,
-                    radialNumAngles,
-                    radialMaxRadius,
-                    radialToolWidth,
-                    radialToolpathZFloor,
-                    radialToolpathBounds
-                );
+                // Use streaming for large angle counts to avoid memory allocation failure
+                const STREAMING_THRESHOLD = 500;
+                const useStreaming = radialNumAngles > STREAMING_THRESHOLD;
 
-                debug.log(`[Worker] Rasterized ${radialModelResult.strips.length} strips`);
+                debug.log(`[Worker] Using ${useStreaming ? 'streaming' : 'batch'} mode for ${radialNumAngles} angles`);
 
-                // Step 2: Generate toolpath for each strip
-                const toolpathStartTime = performance.now();
+                let radialModelResult;
 
-                // Create sparse tool representation ONCE (same for all strips)
-                const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
-                debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
+                if (useStreaming) {
+                    // STREAMING MODE: Fully pipelined rasterization + toolpath generation
+                    // Keep N raster ops and N toolpath ops in flight simultaneously
+                    debug.log('[Worker] Starting fully streaming radial pipeline...');
+
+                    const pipelineStart = performance.now();
+                    const RASTER_POOL_SIZE = 4;
+                    const TOOLPATH_POOL_SIZE = 4;
+
+                    // Calculate dimensions
+                    const gridWidth = Math.ceil((radialToolpathBounds.max.x - radialToolpathBounds.min.x) / radialResolution);
+                    const gridYHeight = Math.ceil(radialToolWidth / radialResolution);
+
+                    // Create sparse tool ONCE
+                    const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
+                    debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points`);
+
+                    // Create toolpath GPU buffers pool
+                    const toolpathBuffersPool = [];
+                    for (let i = 0; i < TOOLPATH_POOL_SIZE; i++) {
+                        const buffers = createReusableToolpathBuffers(gridWidth, gridYHeight, sparseToolData, radialXStep, gridYHeight);
+                        toolpathBuffersPool.push({ buffers, inUse: false });
+                    }
+                    debug.log(`[Worker] Streaming: ${RASTER_POOL_SIZE} raster + ${TOOLPATH_POOL_SIZE} toolpath buffers in flight`);
+
+                    // Set up rasterization resources - create buffers for terrain and buckets
+                    const triangleBuffer = device.createBuffer({
+                        size: radialModelTriangles.byteLength,
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                        mappedAtCreation: true
+                    });
+                    new Float32Array(triangleBuffer.getMappedRange()).set(radialModelTriangles);
+                    triangleBuffer.unmap();
+
+                    const bucketInfoSize = radialBucketData.buckets.length * 16;
+                    const bucketInfoBuffer = device.createBuffer({
+                        size: bucketInfoSize,
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                        mappedAtCreation: true
+                    });
+                    const bucketView = new ArrayBuffer(bucketInfoSize);
+                    const bucketFloatView = new Float32Array(bucketView);
+                    const bucketUintView = new Uint32Array(bucketView);
+                    for (let i = 0; i < radialBucketData.buckets.length; i++) {
+                        const bucket = radialBucketData.buckets[i];
+                        const offset = i * 4;
+                        bucketFloatView[offset] = bucket.minX;
+                        bucketFloatView[offset + 1] = bucket.maxX;
+                        bucketUintView[offset + 2] = bucket.startIndex;
+                        bucketUintView[offset + 3] = bucket.count;
+                    }
+                    new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
+                    bucketInfoBuffer.unmap();
+
+                    const triangleIndicesBuffer = device.createBuffer({
+                        size: radialBucketData.triangleIndices.byteLength,
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                        mappedAtCreation: true
+                    });
+                    new Uint32Array(triangleIndicesBuffer.getMappedRange()).set(radialBucketData.triangleIndices);
+                    triangleIndicesBuffer.unmap();
+
+                    // Create shader and pipeline
+                    const shaderModule = device.createShaderModule({ code: radialRasterizeV2ShaderCode });
+                    const pipeline = device.createComputePipeline({
+                        layout: 'auto',
+                        compute: {
+                            module: shaderModule,
+                            entryPoint: 'main'
+                        }
+                    });
+
+                    const bucketGridWidth = Math.ceil((radialBucketData.buckets[0].maxX - radialBucketData.buckets[0].minX) / radialResolution);
+                    const outputSize = radialBucketData.numBuckets * bucketGridWidth * gridYHeight * 4;
+                    const rasterBufferPool = [];
+                    for (let i = 0; i < RASTER_POOL_SIZE; i++) {
+                        const outputBuffer = device.createBuffer({
+                            size: outputSize,
+                            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+                        });
+                        const stagingBuffer = device.createBuffer({
+                            size: outputSize,
+                            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+                        });
+                        const uniformBuffer = device.createBuffer({
+                            size: 48,
+                            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                        });
+                        // Create bind group once for each buffer set
+                        const bindGroup = device.createBindGroup({
+                            layout: pipeline.getBindGroupLayout(0),
+                            entries: [
+                                { binding: 0, resource: { buffer: triangleBuffer } },
+                                { binding: 1, resource: { buffer: outputBuffer } },
+                                { binding: 2, resource: { buffer: uniformBuffer } },
+                                { binding: 3, resource: { buffer: bucketInfoBuffer } },
+                                { binding: 4, resource: { buffer: triangleIndicesBuffer } }
+                            ]
+                        });
+                        rasterBufferPool.push({ outputBuffer, stagingBuffer, uniformBuffer, bindGroup, inUse: false });
+                    }
+
+                    const initData = new Float32Array(gridWidth * gridYHeight).fill(-Infinity);
+
+                    const stripToolpaths = [];
+                    let totalToolpathPoints = 0;
+                    const rasterInFlight = [];
+                    const toolpathInFlight = [];
+
+                    // Pipeline loop: submit raster work, chain toolpath work
+                    for (let angleIdx = 0; angleIdx < radialNumAngles; angleIdx++) {
+                        const angle = angleIdx * radialAngleStep;
+
+                        // Wait for available raster buffer
+                        while (rasterBufferPool.every(b => b.inUse)) {
+                            await rasterInFlight.shift();
+                        }
+
+                        const rasterBuffers = rasterBufferPool.find(b => !b.inUse);
+                        rasterBuffers.inUse = true;
+
+                        // Submit raster GPU work (non-blocking)
+                        const angleRad = angle * Math.PI / 180;
+                        const uniformView = new Float32Array([
+                            gridWidth, gridYHeight, radialBucketData.numBuckets, 0,
+                            gridYHeight / 2, radialResolution, angleRad, radialMaxRadius,
+                            radialToolpathBounds.min.x, radialToolpathBounds.min.y, radialToolWidth, radialToolpathZFloor
+                        ]);
+
+                        device.queue.writeBuffer(rasterBuffers.uniformBuffer, 0, uniformView);
+                        device.queue.writeBuffer(rasterBuffers.outputBuffer, 0, initData);
+
+                        const commandEncoder = device.createCommandEncoder();
+                        const passEncoder = commandEncoder.beginComputePass();
+                        passEncoder.setPipeline(pipeline);
+                        passEncoder.setBindGroup(0, rasterBuffers.bindGroup);
+                        passEncoder.dispatchWorkgroups(1, Math.ceil(gridYHeight / 8), radialBucketData.numBuckets);
+                        passEncoder.end();
+                        commandEncoder.copyBufferToBuffer(rasterBuffers.outputBuffer, 0, rasterBuffers.stagingBuffer, 0, outputSize);
+                        device.queue.submit([commandEncoder.finish()]);
+
+                        // Chain raster completion → toolpath submission
+                        const pipelinePromise = (async () => {
+                            // Wait for raster to complete
+                            await rasterBuffers.stagingBuffer.mapAsync(GPUMapMode.READ);
+                            const outputData = new Float32Array(rasterBuffers.stagingBuffer.getMappedRange());
+
+                            // Stitch strip from buckets
+                            const stripData = new Float32Array(gridWidth * gridYHeight);
+                            const bucketWidth = Math.ceil(gridWidth / radialBucketData.numBuckets);
+
+                            for (let bucketIdx = 0; bucketIdx < radialBucketData.numBuckets; bucketIdx++) {
+                                const bucketStartX = bucketIdx * bucketWidth;
+                                const bucketEndX = Math.min(bucketStartX + bucketWidth, gridWidth);
+                                const actualBucketWidth = bucketEndX - bucketStartX;
+
+                                for (let yIdx = 0; yIdx < gridYHeight; yIdx++) {
+                                    for (let xIdx = 0; xIdx < actualBucketWidth; xIdx++) {
+                                        const srcIdx = bucketIdx * (bucketWidth * gridYHeight) + yIdx * bucketWidth + xIdx;
+                                        const dstIdx = yIdx * gridWidth + (bucketStartX + xIdx);
+                                        stripData[dstIdx] = outputData[srcIdx];
+                                    }
+                                }
+                            }
+
+                            rasterBuffers.stagingBuffer.unmap();
+                            rasterBuffers.inUse = false;
+
+                            // Wait for available toolpath buffer
+                            while (toolpathBuffersPool.every(b => b.inUse)) {
+                                await toolpathInFlight.shift();
+                            }
+
+                            const toolpathBuffersSlot = toolpathBuffersPool.find(b => !b.inUse);
+                            toolpathBuffersSlot.inUse = true;
+
+                            // Submit toolpath GPU work (non-blocking)
+                            const toolpathPromise = (async () => {
+                                const stripToolpathResult = await runToolpathComputeWithBuffers(
+                                    stripData,
+                                    gridWidth,
+                                    gridYHeight,
+                                    radialXStep,
+                                    gridYHeight,
+                                    radialToolpathZFloor,
+                                    toolpathBuffersSlot.buffers,
+                                    pipelineStart
+                                );
+
+                                stripToolpaths.push({
+                                    angle: angle,
+                                    pathData: stripToolpathResult.pathData,
+                                    numScanlines: stripToolpathResult.numScanlines,
+                                    pointsPerLine: stripToolpathResult.pointsPerLine
+                                });
+
+                                totalToolpathPoints += stripToolpathResult.pathData.length;
+                                toolpathBuffersSlot.inUse = false;
+
+                                // Progress reporting
+                                if (angleIdx % 10 === 0 || angleIdx === radialNumAngles - 1) {
+                                    self.postMessage({
+                                        type: 'toolpath-progress',
+                                        data: {
+                                            percent: Math.round(((angleIdx + 1) / radialNumAngles) * 100),
+                                            current: angleIdx + 1,
+                                            total: radialNumAngles,
+                                            layer: angleIdx + 1
+                                        }
+                                    });
+                                }
+                            })();
+
+                            toolpathInFlight.push(toolpathPromise);
+                            return toolpathPromise;
+                        })();
+
+                        rasterInFlight.push(pipelinePromise);
+                    }
+
+                    // Wait for all pipeline work to complete
+                    await Promise.all(rasterInFlight);
+                    await Promise.all(toolpathInFlight);
+
+                    // Cleanup
+                    for (const slot of toolpathBuffersPool) {
+                        destroyReusableToolpathBuffers(slot.buffers);
+                    }
+                    for (const buffers of rasterBufferPool) {
+                        buffers.outputBuffer.destroy();
+                        buffers.stagingBuffer.destroy();
+                        buffers.uniformBuffer.destroy();
+                    }
+                    triangleBuffer.destroy();
+                    bucketInfoBuffer.destroy();
+                    triangleIndicesBuffer.destroy();
+
+                    const pipelineTotalTime = performance.now() - pipelineStart;
+                    debug.log(`[Worker] Streaming pipeline complete: ${stripToolpaths.length} strips, ${totalToolpathPoints} points in ${pipelineTotalTime.toFixed(0)}ms`);
+
+                    const toolpathTransferBuffers = stripToolpaths.map(s => s.pathData.buffer);
+                    self.postMessage({
+                        type: 'radial-toolpaths-complete',
+                        data: {
+                            strips: stripToolpaths,
+                            totalPoints: totalToolpathPoints,
+                            numStrips: stripToolpaths.length,
+                            terrainStrips: []  // No terrain in streaming mode
+                        }
+                    }, toolpathTransferBuffers);
+                } else {
+                    // BATCH MODE: rasterize all, then toolpath all (fast for small angle counts)
+                    const radialModelResult = await radialRasterizeV2(
+                        radialModelTriangles,
+                        radialBucketData,
+                        radialResolution,
+                        radialAngleStep,
+                        radialNumAngles,
+                        radialMaxRadius,
+                        radialToolWidth,
+                        radialToolpathZFloor,
+                        radialToolpathBounds
+                    );
+
+                    debug.log(`[Worker] Rasterized ${radialModelResult.strips.length} strips`);
+
+                    const toolpathStartTime = performance.now();
+
+                    const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
+                    debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
+
+                    let maxStripWidth = 0;
+                    let maxStripHeight = 0;
+                    for (const strip of radialModelResult.strips) {
+                        maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
+                        maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
+                    }
+
+                    const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
+                    debug.log(`[Worker] Created reusable GPU buffers for ${maxStripWidth}x${maxStripHeight} terrain (1 scanline output)`);
+
+                    const stripToolpaths = [];
+                    let totalToolpathPoints = 0;
+
+                    for (let i = 0; i < radialModelResult.strips.length; i++) {
+                        const strip = radialModelResult.strips[i];
+
+                        if (i % 10 === 0 || i === radialModelResult.strips.length - 1) {
+                            self.postMessage({
+                                type: 'toolpath-progress',
+                                data: {
+                                    percent: Math.round(((i + 1) / radialModelResult.strips.length) * 100),
+                                    current: i + 1,
+                                    total: radialModelResult.strips.length,
+                                    layer: i + 1
+                                }
+                            });
+                        }
+
+                        if (!strip.positions || strip.positions.length === 0) continue;
+
+                        const stripStartTime = performance.now();
+                        const stripToolpathResult = await runToolpathComputeWithBuffers(
+                            strip.positions,
+                            strip.gridWidth,
+                            strip.gridHeight,
+                            radialXStep,
+                            strip.gridHeight,
+                            radialToolpathZFloor,
+                            reusableBuffers,
+                            stripStartTime
+                        );
+
+                        stripToolpaths.push({
+                            angle: strip.angle,
+                            pathData: stripToolpathResult.pathData,
+                            numScanlines: stripToolpathResult.numScanlines,
+                            pointsPerLine: stripToolpathResult.pointsPerLine
+                        });
+
+                        totalToolpathPoints += stripToolpathResult.pathData.length;
+                    }
+
+                    destroyReusableToolpathBuffers(reusableBuffers);
+
+                    const toolpathTotalTime = performance.now() - toolpathStartTime;
+                    debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points in ${toolpathTotalTime.toFixed(0)}ms`);
+
+                    const toolpathTransferBuffers = stripToolpaths.map(strip => strip.pathData.buffer);
+                    const terrainTransferBuffers = radialModelResult.strips.map(strip => strip.positions.buffer);
+
+                    self.postMessage({
+                        type: 'radial-toolpaths-complete',
+                        data: {
+                            strips: stripToolpaths,
+                            totalPoints: totalToolpathPoints,
+                            numStrips: stripToolpaths.length,
+                            terrainStrips: radialModelResult.strips
+                        }
+                    }, [...toolpathTransferBuffers, ...terrainTransferBuffers]);
+                }
+                break;
+
+            case 'generate-toolpaths-radial':
+                // Two-step API: Generate toolpaths for already-rasterized radial strips
+                // This is different from 'radial-generate-toolpaths' which does both rasterization AND toolpath generation
+                const {
+                    modelResult: toolpathModelResult,
+                    toolData: toolpathToolData,
+                    xStep: toolpathXStep,
+                    yStep: toolpathYStep,
+                    zFloor: toolpathZFloor,
+                    resolution: toolpathResolution
+                } = data;
+
+                debug.log('[Worker] Generating toolpaths for pre-rasterized radial strips...');
+
+                const toolpathStart = performance.now();
+
+                // Create sparse tool representation ONCE
+                const sparseToolForToolpath = createSparseToolFromPoints(toolpathToolData.positions);
+                debug.log(`[Worker] Created sparse tool: ${sparseToolForToolpath.count} points`);
 
                 // Find maximum strip dimensions for buffer sizing
-                let maxStripWidth = 0;
-                let maxStripHeight = 0;
-                for (const strip of radialModelResult.strips) {
-                    maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
-                    maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
+                let maxToolpathWidth = 0;
+                let maxToolpathHeight = 0;
+                for (const strip of toolpathModelResult.strips) {
+                    maxToolpathWidth = Math.max(maxToolpathWidth, strip.gridWidth);
+                    maxToolpathHeight = Math.max(maxToolpathHeight, strip.gridHeight);
                 }
 
                 // Create reusable GPU buffers ONCE for all strips
-                // For radial mode: pass maxStripHeight as yStep to ensure single-scanline output buffers
-                const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
-                debug.log(`[Worker] Created reusable GPU buffers for ${maxStripWidth}x${maxStripHeight} terrain (1 scanline output)`);
+                const toolpathReusableBuffers = createReusableToolpathBuffers(
+                    maxToolpathWidth,
+                    maxToolpathHeight,
+                    sparseToolForToolpath,
+                    toolpathXStep,
+                    maxToolpathHeight  // Force yStep = gridHeight for single-scanline output
+                );
+                debug.log(`[Worker] Created reusable GPU buffers for ${maxToolpathWidth}x${maxToolpathHeight} terrain`);
 
-                const stripToolpaths = [];
-                let totalToolpathPoints = 0;
+                const toolpathStrips = [];
+                let toolpathTotalPoints = 0;
 
                 // Process strips sequentially with reusable buffers
-                for (let i = 0; i < radialModelResult.strips.length; i++) {
-                    const strip = radialModelResult.strips[i];
+                for (let i = 0; i < toolpathModelResult.strips.length; i++) {
+                    const strip = toolpathModelResult.strips[i];
 
-                    // Report progress every 10 strips to reduce overhead
-                    if (i % 10 === 0 || i === radialModelResult.strips.length - 1) {
+                    // Report progress every 10 strips
+                    if (i % 10 === 0 || i === toolpathModelResult.strips.length - 1) {
                         self.postMessage({
                             type: 'toolpath-progress',
                             data: {
-                                percent: Math.round(((i + 1) / radialModelResult.strips.length) * 100),
+                                percent: Math.round(((i + 1) / toolpathModelResult.strips.length) * 100),
                                 current: i + 1,
-                                total: radialModelResult.strips.length,
+                                total: toolpathModelResult.strips.length,
                                 layer: i + 1
                             }
                         });
                     }
 
-                    // Skip empty strips (no terrain points)
+                    // Skip empty strips
                     if (!strip.positions || strip.positions.length === 0) {
                         continue;
                     }
 
-                    // Generate toolpath using reusable buffers (sequential but fast)
-                    // For radial mode: yStep = gridHeight ensures single centerline scanline output
-                    // (numScanlines = ceil(gridHeight / yStep) = ceil(gridHeight / gridHeight) = 1)
-                    const stripStartTime = performance.now();
-                    const stripToolpathResult = await runToolpathComputeWithBuffers(
+                    // Generate toolpath using reusable buffers
+                    const stripToolpathRes = await runToolpathComputeWithBuffers(
                         strip.positions,
                         strip.gridWidth,
                         strip.gridHeight,
-                        radialXStep,
+                        toolpathXStep,
                         strip.gridHeight,  // Force yStep = gridHeight for single-scanline output
-                        radialToolpathZFloor,
-                        reusableBuffers,
-                        stripStartTime
+                        toolpathZFloor,
+                        toolpathReusableBuffers,
+                        toolpathStart
                     );
 
-                    stripToolpaths.push({
+                    toolpathStrips.push({
                         angle: strip.angle,
-                        pathData: stripToolpathResult.pathData,
-                        numScanlines: stripToolpathResult.numScanlines,
-                        pointsPerLine: stripToolpathResult.pointsPerLine
+                        pathData: stripToolpathRes.pathData,
+                        numScanlines: stripToolpathRes.numScanlines,
+                        pointsPerLine: stripToolpathRes.pointsPerLine
                     });
 
-                    totalToolpathPoints += stripToolpathResult.pathData.length;
+                    toolpathTotalPoints += stripToolpathRes.pathData.length;
                 }
 
                 // Cleanup reusable buffers
-                destroyReusableToolpathBuffers(reusableBuffers);
+                destroyReusableToolpathBuffers(toolpathReusableBuffers);
 
-                const toolpathTotalTime = performance.now() - toolpathStartTime;
-                debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points in ${toolpathTotalTime.toFixed(0)}ms`);
+                const twoStepToolpathTime = performance.now() - toolpathStart;
+                debug.log(`[Worker] Toolpath generation complete: ${toolpathStrips.length} strips, ${toolpathTotalPoints} points in ${twoStepToolpathTime.toFixed(0)}ms`);
 
-                // Transfer all strip toolpath buffers AND terrain strip buffers
-                const toolpathTransferBuffers = stripToolpaths.map(strip => strip.pathData.buffer);
-                const terrainTransferBuffers = radialModelResult.strips.map(strip => strip.positions.buffer);
+                // Transfer toolpath buffers
+                const toolpathBuffersToTransfer = toolpathStrips.map(strip => strip.pathData.buffer);
 
                 self.postMessage({
-                    type: 'radial-toolpaths-complete',
-                    data: {
-                        strips: stripToolpaths,
-                        totalPoints: totalToolpathPoints,
-                        numStrips: stripToolpaths.length,
-                        terrainStrips: radialModelResult.strips  // Include terrain data for visualization
+                    type: 'toolpath-complete',
+                    result: {
+                        strips: toolpathStrips,
+                        totalPoints: toolpathTotalPoints,
+                        numStrips: toolpathStrips.length
                     }
-                }, [...toolpathTransferBuffers, ...terrainTransferBuffers]);
+                }, toolpathBuffersToTransfer);
                 break;
 
             default:

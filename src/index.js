@@ -404,7 +404,7 @@ export class RasterPath {
             this.worker.addEventListener('message', progressHandler);
 
             this.worker.postMessage({
-                type: 'generate-radial-toolpaths',
+                type: 'generate-toolpaths-radial',
                 data: {
                     modelResult: { strips },
                     toolData,
