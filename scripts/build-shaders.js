@@ -55,6 +55,11 @@ if (!fs.existsSync(BUILD_DIR)) {
     fs.mkdirSync(BUILD_DIR, { recursive: true });
 }
 
+// Inject unique build ID
+const buildId = Math.random().toString(36).substring(2, 10).toUpperCase();
+workerCode = workerCode.replace(/BUILD_ID_PLACEHOLDER/g, buildId);
+console.log(`🔨 Build ID: ${buildId}`);
+
 // Write output
 fs.writeFileSync(WORKER_DEST, workerCode, 'utf8');
 console.log(`✅ Built: ${WORKER_DEST}`);

@@ -394,6 +394,7 @@ async function generateToolpath() {
 
             const t1 = performance.now();
             console.log('Radial toolpaths generated:', toolpathData);
+            console.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
             updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
 
             // Store terrain strips for visualization
@@ -826,6 +827,21 @@ function displayToolpaths(wrapped) {
         const stepSize = resolution;
 
         console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips');
+
+        // DEBUG: Check angle distribution AND data
+        if (strips.length > 0) {
+            const angleChecks = [0, 180, 359, 360, 361, 540, 719].filter(i => i < strips.length);
+            console.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
+            // Check if pathData is actually different between strips
+            if (strips.length > 360) {
+                const samples0 = strips[0].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
+                const samples360 = strips[360].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
+                console.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
+                console.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
+                console.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
+            }
+        }
+
         if (strips.length > 0) {
             const firstStrip = strips[0];
             // Note: modelRasterData may be null with new pipeline (rasterize + toolpath in one step)

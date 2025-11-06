@@ -16,6 +16,7 @@ struct Uniforms {
     z_floor: f32,              // Z value for empty cells
     filter_mode: u32,          // 0 = max Z (terrain), 1 = min Z (tool)
     num_buckets: u32,          // Total number of X-buckets
+    start_angle: f32,          // Starting angle offset in radians (for batching)
 }
 
 struct BucketInfo {
@@ -106,7 +107,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let bucket = bucket_info[bucket_idx];
-    let angle = f32(angle_idx) * uniforms.angle_step;
+    let angle = uniforms.start_angle + (f32(angle_idx) * uniforms.angle_step);
 
     // Calculate bucket min grid X
     let bucket_min_grid_x = u32((bucket.min_x - uniforms.global_min_x) / uniforms.resolution);

@@ -1179,8 +1179,9 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
 
     await buffers.stagingBuffer.mapAsync(GPUMapMode.READ);
 
-    const outputData = new Float32Array(buffers.stagingBuffer.getMappedRange().slice(0, outputSize * 4));
-    const result = new Float32Array(outputData);
+    // Create a true copy using slice() - new Float32Array(typedArray) only creates a view!
+    const outputData = new Float32Array(buffers.stagingBuffer.getMappedRange(), 0, outputSize);
+    const result = outputData.slice();  // slice() creates a new ArrayBuffer with copied data
     buffers.stagingBuffer.unmap();
 
     const endTime = performance.now();
@@ -1191,7 +1192,7 @@ async function runToolpathComputeWithBuffers(terrainData, terrainWidth, terrainH
         for (let i = 0; i < Math.min(10, result.length); i++) {
             samples.push(result[i].toFixed(3));
         }
-        debug.log(`[Toolpath] Output samples (${result.length} total): ${samples.join(', ')}`);
+        // debug.log(`[Toolpath] Output samples (${result.length} total): ${samples.join(', ')}`);
     }
 
     return {
@@ -2019,7 +2020,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const gridWidth = Math.ceil((bucketMaxX - bucketMinX) / resolution);
     const gridYHeight = Math.ceil(toolWidth / resolution);
     const bucketGridWidth = Math.ceil((bucketData.buckets[0].maxX - bucketData.buckets[0].minX) / resolution);
-console.log({ toolWidth });
+
     // Calculate workgroup load distribution for timeout analysis
     const bucketTriangleCounts = bucketData.buckets.map(b => b.count);
     const minTriangles = Math.min(...bucketTriangleCounts);
@@ -2090,14 +2091,14 @@ console.log({ toolWidth });
     await device.queue.onSubmittedWorkDone();
 
     // Create uniforms with proper alignment (f32 and u32 mixed)
-    // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32
+    // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32, f32
     const uniformBuffer = device.createBuffer({
-        size: 48,  // 12 fields * 4 bytes
+        size: 52,  // 13 fields * 4 bytes
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true
     });
 
-    const uniformView = new ArrayBuffer(48);
+    const uniformView = new ArrayBuffer(52);
     const floatView = new Float32Array(uniformView);
     const uintView = new Uint32Array(uniformView);
 
@@ -2113,6 +2114,7 @@ console.log({ toolWidth });
     floatView[9] = zFloor;                                              // f32
     uintView[10] = 0;                                                   // u32 filterMode
     uintView[11] = bucketData.numBuckets;                               // u32
+    floatView[12] = startAngle * (Math.PI / 180);                       // f32 start_angle (radians)
 
     new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
     uniformBuffer.unmap();
@@ -2407,6 +2409,7 @@ self.onmessage = async function(e) {
                     const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
 
                     // Generate toolpaths for this batch
+                    debug.log(`[Worker] Batch ${batchIdx + 1}: Generating toolpaths for ${batchModelResult.strips.length} strips...`);
                     for (let i = 0; i < batchModelResult.strips.length; i++) {
                         const strip = batchModelResult.strips[i];
                         const globalStripIdx = startAngleIdx + i;
@@ -2425,6 +2428,11 @@ self.onmessage = async function(e) {
 
                         if (!strip.positions || strip.positions.length === 0) continue;
 
+                        // DEBUG: BUILD_ID_PLACEHOLDER - Check INPUT terrain data
+                        if (globalStripIdx === 0 || globalStripIdx === 360) {
+                            debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) INPUT terrain first 5 Z values: ${strip.positions.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
+                        }
+
                         const stripToolpathResult = await runToolpathComputeWithBuffers(
                             strip.positions,
                             strip.gridWidth,
@@ -2435,6 +2443,11 @@ self.onmessage = async function(e) {
                             reusableBuffers,
                             pipelineStartTime
                         );
+
+                        // DEBUG: BUILD_ID_PLACEHOLDER - Verify OUTPUT buffer copying
+                        if (globalStripIdx === 0 || globalStripIdx === 360) {
+                            debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) OUTPUT toolpath first 5 Z values: ${stripToolpathResult.pathData.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
+                        }
 
                         allStripToolpaths.push({
                             angle: strip.angle,
@@ -2448,6 +2461,8 @@ self.onmessage = async function(e) {
                     }
 
                     destroyReusableToolpathBuffers(reusableBuffers);
+
+                    debug.log(`[Worker] Batch ${batchIdx + 1}: Completed, allStripToolpaths now has ${allStripToolpaths.length} strips total`);
 
                     // Free batch terrain data
                     for (const strip of batchModelResult.strips) {
