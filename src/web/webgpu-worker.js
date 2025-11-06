@@ -2000,7 +2000,7 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
 }
 
 // Radial V2: Rasterize model with rotating ray planes and X-bucketing
-async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds) {
+async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds, startAngle = 0) {
     if (!device) {
         throw new Error('WebGPU not initialized');
     }
@@ -2223,7 +2223,7 @@ console.log({ toolWidth });
         }
 
         strips.push({
-            angle: angleIdx * angleStep,
+            angle: startAngle + (angleIdx * angleStep),
             positions: stripData,  // DENSE Z-only format!
             gridWidth,
             gridHeight: gridYHeight,
@@ -2357,95 +2357,117 @@ self.onmessage = async function(e) {
 
                 debug.log('[Worker] Starting complete radial toolpath pipeline...');
 
-                // Rasterize all strips
-                const radialModelResult = await radialRasterizeV2(
-                    radialModelTriangles,
-                    radialBucketData,
-                    radialResolution,
-                    radialAngleStep,
-                    radialNumAngles,
-                    radialMaxRadius,
-                    radialToolWidth,
-                    radialToolpathZFloor,
-                    radialToolpathBounds
-                );
+                // Batch processing: rasterize angle ranges to avoid memory allocation failure
+                const ANGLES_PER_BATCH = 360;  // Process 360 angles at a time
+                const numBatches = Math.ceil(radialNumAngles / ANGLES_PER_BATCH);
 
-                debug.log(`[Worker] Rasterized ${radialModelResult.strips.length} strips`);
+                debug.log(`[Worker] Processing ${radialNumAngles} angles in ${numBatches} batch(es) of up to ${ANGLES_PER_BATCH} angles`);
 
-                const toolpathStartTime = performance.now();
+                const allStripToolpaths = [];
+                let totalToolpathPoints = 0;
+                const pipelineStartTime = performance.now();
 
+                // Prepare sparse tool once
                 const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
                 debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
 
-                let maxStripWidth = 0;
-                let maxStripHeight = 0;
-                for (const strip of radialModelResult.strips) {
-                    maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
-                    maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
-                }
+                for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
+                    const startAngleIdx = batchIdx * ANGLES_PER_BATCH;
+                    const endAngleIdx = Math.min(startAngleIdx + ANGLES_PER_BATCH, radialNumAngles);
+                    const batchNumAngles = endAngleIdx - startAngleIdx;
+                    const batchStartAngle = startAngleIdx * radialAngleStep;
 
-                const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
-                debug.log(`[Worker] Created reusable GPU buffers for ${maxStripWidth}x${maxStripHeight} terrain (1 scanline output)`);
+                    debug.log(`[Worker] Batch ${batchIdx + 1}/${numBatches}: angles ${startAngleIdx}-${endAngleIdx - 1} (${batchNumAngles} angles), startAngle=${batchStartAngle.toFixed(1)}°`);
 
-                const stripToolpaths = [];
-                let totalToolpathPoints = 0;
-
-                for (let i = 0; i < radialModelResult.strips.length; i++) {
-                    const strip = radialModelResult.strips[i];
-
-                    if (i % 10 === 0 || i === radialModelResult.strips.length - 1) {
-                        self.postMessage({
-                            type: 'toolpath-progress',
-                            data: {
-                                percent: Math.round(((i + 1) / radialModelResult.strips.length) * 100),
-                                current: i + 1,
-                                total: radialModelResult.strips.length,
-                                layer: i + 1
-                            }
-                        });
-                    }
-
-                    if (!strip.positions || strip.positions.length === 0) continue;
-
-                    const stripStartTime = performance.now();
-                    const stripToolpathResult = await runToolpathComputeWithBuffers(
-                        strip.positions,
-                        strip.gridWidth,
-                        strip.gridHeight,
-                        radialXStep,
-                        strip.gridHeight,
+                    // Rasterize this batch of strips
+                    const batchModelResult = await radialRasterizeV2(
+                        radialModelTriangles,
+                        radialBucketData,
+                        radialResolution,
+                        radialAngleStep,
+                        batchNumAngles,
+                        radialMaxRadius,
+                        radialToolWidth,
                         radialToolpathZFloor,
-                        reusableBuffers,
-                        stripStartTime
+                        radialToolpathBounds,
+                        batchStartAngle  // Start angle for this batch
                     );
 
-                    stripToolpaths.push({
-                        angle: strip.angle,
-                        pathData: stripToolpathResult.pathData,
-                        numScanlines: stripToolpathResult.numScanlines,
-                        pointsPerLine: stripToolpathResult.pointsPerLine
-                    });
+                    debug.log(`[Worker] Batch ${batchIdx + 1}: Rasterized ${batchModelResult.strips.length} strips, first angle=${batchModelResult.strips[0]?.angle.toFixed(1)}°, last angle=${batchModelResult.strips[batchModelResult.strips.length - 1]?.angle.toFixed(1)}°`);
 
-                    totalToolpathPoints += stripToolpathResult.pathData.length;
+                    // Find max dimensions for this batch
+                    let maxStripWidth = 0;
+                    let maxStripHeight = 0;
+                    for (const strip of batchModelResult.strips) {
+                        maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
+                        maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
+                    }
+
+                    // Create reusable buffers for this batch
+                    const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
+
+                    // Generate toolpaths for this batch
+                    for (let i = 0; i < batchModelResult.strips.length; i++) {
+                        const strip = batchModelResult.strips[i];
+                        const globalStripIdx = startAngleIdx + i;
+
+                        if (globalStripIdx % 10 === 0 || globalStripIdx === radialNumAngles - 1) {
+                            self.postMessage({
+                                type: 'toolpath-progress',
+                                data: {
+                                    percent: Math.round(((globalStripIdx + 1) / radialNumAngles) * 100),
+                                    current: globalStripIdx + 1,
+                                    total: radialNumAngles,
+                                    layer: globalStripIdx + 1
+                                }
+                            });
+                        }
+
+                        if (!strip.positions || strip.positions.length === 0) continue;
+
+                        const stripToolpathResult = await runToolpathComputeWithBuffers(
+                            strip.positions,
+                            strip.gridWidth,
+                            strip.gridHeight,
+                            radialXStep,
+                            strip.gridHeight,
+                            radialToolpathZFloor,
+                            reusableBuffers,
+                            pipelineStartTime
+                        );
+
+                        allStripToolpaths.push({
+                            angle: strip.angle,
+                            pathData: stripToolpathResult.pathData,
+                            numScanlines: stripToolpathResult.numScanlines,
+                            pointsPerLine: stripToolpathResult.pointsPerLine,
+                            terrainBounds: strip.bounds  // Include terrain bounds for display
+                        });
+
+                        totalToolpathPoints += stripToolpathResult.pathData.length;
+                    }
+
+                    destroyReusableToolpathBuffers(reusableBuffers);
+
+                    // Free batch terrain data
+                    for (const strip of batchModelResult.strips) {
+                        strip.positions = null;
+                    }
                 }
 
-                destroyReusableToolpathBuffers(reusableBuffers);
+                const pipelineTotalTime = performance.now() - pipelineStartTime;
+                debug.log(`[Worker] Complete radial toolpath: ${allStripToolpaths.length} strips, ${totalToolpathPoints} total points in ${pipelineTotalTime.toFixed(0)}ms`);
 
-                const toolpathTotalTime = performance.now() - toolpathStartTime;
-                debug.log(`[Worker] Complete radial toolpath: ${stripToolpaths.length} strips, ${totalToolpathPoints} total points in ${toolpathTotalTime.toFixed(0)}ms`);
-
-                const toolpathTransferBuffers = stripToolpaths.map(strip => strip.pathData.buffer);
-                const terrainTransferBuffers = radialModelResult.strips.map(strip => strip.positions.buffer);
+                const toolpathTransferBuffers = allStripToolpaths.map(strip => strip.pathData.buffer);
 
                 self.postMessage({
                     type: 'radial-toolpaths-complete',
                     data: {
-                        strips: stripToolpaths,
+                        strips: allStripToolpaths,
                         totalPoints: totalToolpathPoints,
-                        numStrips: stripToolpaths.length,
-                        terrainStrips: radialModelResult.strips
+                        numStrips: allStripToolpaths.length
                     }
-                }, [...toolpathTransferBuffers, ...terrainTransferBuffers]);
+                }, toolpathTransferBuffers);
                 break;
 
             case 'generate-toolpaths-radial':

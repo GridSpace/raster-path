@@ -424,6 +424,13 @@ async function generateToolpath() {
                         console.log('[Radial] Strip 0 actual X range in positions:', minX.toFixed(2), 'to', maxX.toFixed(2));
                     }
                 }
+            } else if (toolpathData.strips && toolpathData.strips[0]?.terrainBounds) {
+                // Batched mode: create synthetic terrain strips with bounds only
+                modelRasterData = toolpathData.strips.map(strip => ({
+                    angle: strip.angle,
+                    bounds: strip.terrainBounds
+                }));
+                console.log('[Radial] Batched mode: created synthetic terrain strips from bounds:', modelRasterData.length, 'strips');
             }
             // This is fine - we only need toolpathData for visualization
         }
