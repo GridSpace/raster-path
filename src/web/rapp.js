@@ -701,8 +701,14 @@ function displayModelRaster(wrapped) {
                 }
             }
 
-            console.log('[Display] Rendered', totalPointsRendered, 'points');
+            console.log('[Display] Rendered', totalPointsRendered, 'points from', modelRasterData.length, 'strips');
             console.log('[Display] X range: [' + overallMinX.toFixed(2) + ', ' + overallMaxX.toFixed(2) + ']');
+
+            // DEBUG: Check angle coverage
+            const angles = modelRasterData.map(s => s.angle).sort((a, b) => a - b);
+            console.log('[Display] Angle range: [' + angles[0].toFixed(1) + '°, ' + angles[angles.length-1].toFixed(1) + '°]');
+            console.log('[Display] First 5 angles:', angles.slice(0, 5).map(a => a.toFixed(1) + '°').join(', '));
+            console.log('[Display] Last 5 angles:', angles.slice(-5).map(a => a.toFixed(1) + '°').join(', '));
         } else {
             // Show unwrapped (planar) - lay out strips side by side
             for (let stripIdx = 0; stripIdx < modelRasterData.length; stripIdx++) {

@@ -1998,35 +1998,62 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
 
     const startTime = performance.now();
 
-    // Calculate grid dimensions
-    const gridWidth = Math.ceil((bounds.max.x - bounds.min.x) / resolution);
+    // Calculate grid dimensions based on BUCKET range (not model bounds)
+    // Buckets may extend slightly beyond model bounds due to rounding
+    const bucketMinX = bucketData.buckets[0].minX;
+    const bucketMaxX = bucketData.buckets[bucketData.numBuckets - 1].maxX;
+    const gridWidth = Math.ceil((bucketMaxX - bucketMinX) / resolution);
     const gridYHeight = Math.ceil(toolWidth / resolution);
     const bucketGridWidth = Math.ceil((bucketData.buckets[0].maxX - bucketData.buckets[0].minX) / resolution);
 
-    debug.log('[Worker] Radial V2 rasterization:', {
-        gridWidth,
-        gridYHeight,
-        numAngles,
-        numBuckets: bucketData.numBuckets,
-        bucketGridWidth,
-        maxRadius,
-        toolWidth,
-        resolution,
-        angleStepDeg: angleStep,
-        boundsMinX: bounds.min.x,
-        boundsMaxX: bounds.max.x,
-        zFloor
-    });
+    // CRITICAL DEBUG: Check scan coverage
+    const scanYMin = 0 * resolution - toolWidth / 2.0;
+    const scanYMax = (gridYHeight - 1) * resolution - toolWidth / 2.0;
+    const scanYRange = scanYMax - scanYMin;
+
+    debug.log('[Worker] Radial V2 rasterization:');
+    debug.log(`[Worker]   Grid: ${gridWidth} x ${gridYHeight} cells`);
+    debug.log(`[Worker]   Angles: ${numAngles} x ${angleStep}°`);
+    debug.log(`[Worker]   Tool width: ${toolWidth.toFixed(2)} mm`);
+    debug.log(`[Worker]   Max radius: ${maxRadius.toFixed(2)} mm`);
+    debug.log(`[Worker]   Resolution: ${resolution} mm`);
+    debug.log(`[Worker]   Scan Y range: [${scanYMin.toFixed(2)}, ${scanYMax.toFixed(2)}] = ${scanYRange.toFixed(2)} mm (tool width: ${toolWidth.toFixed(2)} mm)`);
 
     // Debug bucket coverage
     if (bucketData.buckets.length > 0) {
         const firstBucket = bucketData.buckets[0];
         const lastBucket = bucketData.buckets[bucketData.buckets.length - 1];
+
+        // Count total triangle references across all buckets (with duplicates for triangles spanning multiple buckets)
+        let totalTriangleRefs = 0;
+        for (const bucket of bucketData.buckets) {
+            totalTriangleRefs += bucket.count;
+        }
+
+        // Count unique triangles
+        const uniqueTriangles = new Set();
+        for (let i = 0; i < bucketData.triangleIndices.length; i++) {
+            uniqueTriangles.add(bucketData.triangleIndices[i]);
+        }
+
         debug.log(`[Worker] Bucket coverage: ${bucketData.buckets.length} buckets`);
+        debug.log(`[Worker]   Total triangle references: ${totalTriangleRefs} (with duplicates for spanning triangles)`);
+        debug.log(`[Worker]   Unique triangles in buckets: ${uniqueTriangles.size} / ${bucketData.totalTriangles} (${(uniqueTriangles.size / bucketData.totalTriangles * 100).toFixed(1)}%)`);
         debug.log(`[Worker]   First bucket X: [${firstBucket.minX.toFixed(2)}, ${firstBucket.maxX.toFixed(2)}], ${firstBucket.count} triangles`);
         debug.log(`[Worker]   Last bucket X: [${lastBucket.minX.toFixed(2)}, ${lastBucket.maxX.toFixed(2)}], ${lastBucket.count} triangles`);
         debug.log(`[Worker]   Total X range: [${firstBucket.minX.toFixed(2)}, ${lastBucket.maxX.toFixed(2)}]`);
         debug.log(`[Worker]   Expected X range: [${bounds.min.x.toFixed(2)}, ${bounds.max.x.toFixed(2)}]`);
+
+        // CRITICAL: Check if buckets around X=0 have triangles
+        const bucket0Idx = bucketData.buckets.findIndex(b => b.minX <= 0 && b.maxX > 0);
+        if (bucket0Idx >= 0) {
+            const bucket0 = bucketData.buckets[bucket0Idx];
+            const bucketAfter0 = bucketData.buckets[bucket0Idx + 1];
+            debug.log(`[Worker] CRITICAL: Bucket at X=0: [${bucket0.minX.toFixed(2)}, ${bucket0.maxX.toFixed(2)}], ${bucket0.count} triangles`);
+            if (bucketAfter0) {
+                debug.log(`[Worker] CRITICAL: Next bucket: [${bucketAfter0.minX.toFixed(2)}, ${bucketAfter0.maxX.toFixed(2)}], ${bucketAfter0.count} triangles`);
+            }
+        }
     }
 
     // Create GPU buffers
@@ -2108,7 +2135,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     uintView[5] = gridYHeight;                                          // u32
     floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;  // f32 bucketWidth
     uintView[7] = bucketGridWidth;                                      // u32
-    floatView[8] = bounds.min.x;                                        // f32 global_min_x
+    floatView[8] = bucketMinX;                                          // f32 global_min_x (use bucket range)
     floatView[9] = zFloor;                                              // f32
     uintView[10] = 0;                                                   // u32 filterMode
     uintView[11] = bucketData.numBuckets;                               // u32
@@ -2149,7 +2176,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const dispatchX = Math.ceil(numAngles / 8);
     const dispatchY = Math.ceil(gridYHeight / 8);
     const dispatchZ = bucketData.numBuckets;
-    debug.log({ dispatchX, dispatchY, dispatchZ });
+    debug.log(`[Worker] Dispatch: (${dispatchX}, ${dispatchY}, ${dispatchZ}) = ${dispatchX * 8} angles, ${dispatchY * 8} Y cells, ${dispatchZ} buckets`);
 
     passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
     passEncoder.end();
@@ -2183,22 +2210,39 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const gpuTime = performance.now() - startTime;
     debug.log('[Worker] GPU rasterization complete:', gpuTime.toFixed(1), 'ms');
 
-    // Debug: Check output buffer for uniqueness
+    // CRITICAL: Check which BUCKETS have data in GPU output
     let minZ = Infinity, maxZ = -Infinity, numNonFloor = 0;
-    for (let i = 0; i < outputCopy.length; i++) {
-        if (outputCopy[i] !== zFloor) {
-            minZ = Math.min(minZ, outputCopy[i]);
-            maxZ = Math.max(maxZ, outputCopy[i]);
-            numNonFloor++;
+    const bucketsWithData = new Set();
+
+    for (let bucketIdx = 0; bucketIdx < bucketData.numBuckets; bucketIdx++) {
+        for (let angleIdx = 0; angleIdx < numAngles; angleIdx++) {
+            for (let gridY = 0; gridY < gridYHeight; gridY++) {
+                for (let localX = 0; localX < bucketGridWidth; localX++) {
+                    const idx = bucketIdx * numAngles * bucketGridWidth * gridYHeight
+                              + angleIdx * bucketGridWidth * gridYHeight
+                              + gridY * bucketGridWidth
+                              + localX;
+                    const val = outputCopy[idx];
+                    if (val !== zFloor) {
+                        minZ = Math.min(minZ, val);
+                        maxZ = Math.max(maxZ, val);
+                        numNonFloor++;
+                        bucketsWithData.add(bucketIdx);
+                    }
+                }
+            }
         }
     }
-    debug.log('[Worker] Output buffer stats:', {
-        totalCells: outputCopy.length,
-        nonFloorCells: numNonFloor,
-        minZ: minZ.toFixed(3),
-        maxZ: maxZ.toFixed(3),
-        first10: Array.from(outputCopy.slice(0, 10)).map(v => v.toFixed(2))
-    });
+
+    const bucketList = Array.from(bucketsWithData).sort((a, b) => a - b);
+    debug.log('[Worker] GPU Output Analysis:');
+    debug.log(`[Worker]   Total cells: ${outputCopy.length}, non-floor: ${numNonFloor}`);
+    debug.log(`[Worker]   Z range: [${minZ.toFixed(3)}, ${maxZ.toFixed(3)}]`);
+    debug.log(`[Worker]   Buckets with data: ${bucketList.length}/${bucketData.numBuckets}`);
+    if (bucketList.length > 0) {
+        debug.log(`[Worker]   Bucket range: [${bucketList[0]} to ${bucketList[bucketList.length - 1]}] (${bucketList.length} buckets)`);
+        debug.log(`[Worker]   Expected: [0 to ${bucketData.numBuckets - 1}] (${bucketData.numBuckets} buckets)`);
+    }
 
     // Verified: All angles produce unique results with distance-based calculation
 
@@ -2213,7 +2257,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         // Gather from each bucket
         for (let bucketIdx = 0; bucketIdx < bucketData.numBuckets; bucketIdx++) {
             const bucket = bucketData.buckets[bucketIdx];
-            const bucketMinGridX = Math.floor((bucket.minX - bounds.min.x) / resolution);
+            const bucketMinGridX = Math.floor((bucket.minX - bucketMinX) / resolution);
 
             for (let localX = 0; localX < bucketGridWidth; localX++) {
                 const gridX = bucketMinGridX + localX;
@@ -2230,42 +2274,41 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
             }
         }
 
-        // Convert to sparse format [worldX, worldY, Z, ...]
-        // NOTE: Must use world coordinates, not grid indices, for toolpath generator
-        const sparsePositions = [];
+        // Keep as DENSE Z-only format (toolpath generator expects this!)
+        // stripData is already in correct format: Float32Array of Z values indexed by [y * gridWidth + x]
+
+        // Calculate stats for debugging
         let minZ = Infinity, maxZ = -Infinity;
         let validCount = 0;
-        for (let y = 0; y < gridYHeight; y++) {
-            for (let x = 0; x < gridWidth; x++) {
-                const z = stripData[y * gridWidth + x];
-                minZ = Math.min(minZ, z);
-                maxZ = Math.max(maxZ, z);
-                // Include ALL cells - let toolpath generator decide what's valid
-                // Convert grid indices to world coordinates
-                const worldX = bounds.min.x + x * resolution;
-                const worldY = y * resolution;  // Y is 0 to toolWidth
-                sparsePositions.push(worldX, worldY, z);
-                if (z !== zFloor) validCount++;
+        for (let i = 0; i < stripData.length; i++) {
+            if (stripData[i] !== zFloor) {
+                minZ = Math.min(minZ, stripData[i]);
+                maxZ = Math.max(maxZ, stripData[i]);
+                validCount++;
             }
         }
 
-        // Verified: X coverage is 98-99% across all strips (full range)
+        // DEBUG: Log strip 0 stats
+        if (angleIdx === 0) {
+            debug.log(`[Worker] Strip 0 dense: ${gridWidth}x${gridYHeight} = ${stripData.length} cells, ${validCount} valid, Z range [${minZ.toFixed(2)}, ${maxZ.toFixed(2)}]`);
+        }
 
         strips.push({
             angle: angleIdx * angleStep,
-            positions: new Float32Array(sparsePositions),
+            positions: stripData,  // DENSE Z-only format!
             gridWidth,
             gridHeight: gridYHeight,
-            pointCount: sparsePositions.length / 3,
+            pointCount: validCount,  // Number of non-floor cells
             bounds: {
-                min: { x: bounds.min.x, y: 0, z: zFloor },
-                max: { x: bounds.max.x, y: toolWidth, z: bounds.max.z }
+                min: { x: bucketMinX, y: 0, z: zFloor },
+                max: { x: bucketMaxX, y: toolWidth, z: bounds.max.z }
             }
         });
     }
 
     const stitchTime = performance.now() - stitchStart;
     debug.log('[Worker] Strip stitching complete:', stitchTime.toFixed(1), 'ms');
+    debug.log(`[Worker] Created ${strips.length} strips (expected ${numAngles})`);
     debug.log('[Worker] Total time:', (performance.now() - startTime).toFixed(1), 'ms');
 
     return { strips };
