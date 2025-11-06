@@ -328,19 +328,11 @@ export class RasterPath {
         );
 
         // Create X-buckets for triangle attention
-        const bucketWidth = 2.0; // mm - tune this for performance
+        const bucketWidth = 1.0; // mm - smaller buckets = better load balancing (was 2.0mm)
         const bucketData = this.#bucketTrianglesByX(centeredTriangles, bounds, bucketWidth);
 
         // Calculate number of angles - full 360° rotation
         const numAngles = Math.ceil(360 / this.rotationStep);
-
-        debug.log('[RasterPath] Radial V2 rasterization:', {
-            numAngles,
-            buckets: bucketData.buckets.length,
-            maxRadius: maxRadius.toFixed(2),
-            toolWidth: toolWidth.toFixed(2),
-            bounds
-        });
 
         // Send to worker for GPU processing
         const result = await new Promise((resolve, reject) => {
@@ -487,7 +479,7 @@ export class RasterPath {
 
         // Build X-bucketing data - full 360° rotation
         const numAngles = Math.ceil(360 / this.rotationStep);
-        const bucketWidth = 2.0; // mm - tune this for performance
+        const bucketWidth = 1.0; // mm - smaller buckets = better load balancing (was 2.0mm)
         const bucketData = this.#bucketTrianglesByX(centeredTriangles, bounds, bucketWidth);
 
         return new Promise((resolve, reject) => {
@@ -649,12 +641,6 @@ export class RasterPath {
             });
             triangleIndices.push(...bucket.triangleIndices);
         }
-
-        debug.log('[RasterPath] Bucketing stats:', {
-            numBuckets,
-            avgTrianglesPerBucket: (triangleIndices.length / numBuckets).toFixed(1),
-            totalIndices: triangleIndices.length
-        });
 
         return {
             buckets: bucketInfo,

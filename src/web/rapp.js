@@ -851,7 +851,8 @@ function displayToolpaths(wrapped) {
                 const stripBounds = modelRasterData.find(s => s.angle === angle)?.bounds ||
                                   { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
 
-                const theta = angle * Math.PI / 180;
+                // Add 90° rotation to match model orientation
+                const theta = (angle + 90) * Math.PI / 180;
                 const cosTheta = Math.cos(theta);
                 const sinTheta = Math.sin(theta);
 
