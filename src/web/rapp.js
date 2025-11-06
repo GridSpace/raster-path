@@ -847,11 +847,12 @@ function displayToolpaths(wrapped) {
             // Each strip should have numScanlines=1 (single centerline)
             for (const strip of strips) {
                 const { angle, pathData, numScanlines, pointsPerLine } = strip;
-                // Get bounds from the strip's terrain data
-                const stripBounds = modelRasterData.find(s => s.angle === angle)?.bounds ||
-                                  { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
+                // Get bounds and centerOffset from the strip's terrain data
+                const terrainStrip = modelRasterData.find(s => s.angle === angle);
+                const stripBounds = terrainStrip?.bounds || { min: { x: -100, y: 0, z: 0 }, max: { x: 100, y: 10, z: 20 } };
+                const centerOffset = terrainStrip?.centerOffset || { y: 0, z: 0 };
 
-                // Add 90° rotation to match model orientation
+                // Rotate around X-axis at this angle (add 90° for coordinate system alignment)
                 const theta = (angle + 90) * Math.PI / 180;
                 const cosTheta = Math.cos(theta);
                 const sinTheta = Math.sin(theta);
@@ -865,7 +866,7 @@ function displayToolpaths(wrapped) {
                         const gridX = pt * xStep;
                         const x = stripBounds.min.x + gridX * stepSize;
 
-                        // Wrap the radius around X-axis at this angle
+                        // Wrap around X-axis (centering will be handled by position offset)
                         const yWrapped = radius * cosTheta;
                         const zWrapped = radius * sinTheta;
 
@@ -916,6 +917,20 @@ function displayToolpaths(wrapped) {
         });
 
         toolpathPoints = new THREE.Points(geometry, material);
+
+        // Center toolpath on model mesh
+        if (modelMesh) {
+            geometry.computeBoundingBox();
+            const toolpathCenter = new THREE.Vector3();
+            geometry.boundingBox.getCenter(toolpathCenter);
+
+            const modelCenter = new THREE.Vector3();
+            modelMesh.geometry.boundingBox.getCenter(modelCenter);
+
+            // Offset toolpath to match model center
+            toolpathPoints.position.copy(modelCenter).sub(toolpathCenter);
+        }
+
         rotatedGroup.add(toolpathPoints);
     }
 }

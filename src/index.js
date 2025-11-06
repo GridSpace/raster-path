@@ -349,7 +349,9 @@ export class RasterPath {
                     maxRadius: maxRadius * 1.01, // Safety margin
                     toolWidth,
                     zFloor: zFloor ?? 0,
-                    bounds
+                    bounds,
+                    originalBounds,  // Pass original bounds for visualization reference
+                    centerOffset: { y: centerY, z: centerZ }  // For un-centering in visualization
                 },
                 'radial-rasterize-v2-complete',
                 handler
