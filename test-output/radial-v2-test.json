@@ -1,0 +1,25 @@
+{
+  "success": true,
+  "parameters": {
+    "resolution": 0.5,
+    "rotationStep": 10,
+    "xStep": 1,
+    "yStep": 1,
+    "zFloor": 0
+  },
+  "timing": {
+    "tool": 7.5,
+    "terrain": 20.799999982118607,
+    "toolpath": 186.5,
+    "total": 214.7999999821186
+  },
+  "terrain": {
+    "numStrips": 36,
+    "totalPoints": 59343,
+    "nonEmptyStrips": 36
+  },
+  "toolpath": {
+    "numStrips": 36,
+    "totalPoints": 5400
+  }
+}

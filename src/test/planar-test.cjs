@@ -1,6 +1,6 @@
 // planar-test.cjs
 // Regression test for planar mode using new RasterPath API
-// Tests: rasterizeModel() + rasterizeTool() + generateToolpaths()
+// Tests: loadTool() + loadTerrain() + generateToolpaths()
 
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
@@ -100,31 +100,29 @@ function createWindow() {
                 await raster.init();
                 console.log('✓ RasterPath initialized');
 
-                // Rasterize model (terrain)
-                console.log('\\n1. Rasterizing model...');
+                // Load tool (NEW API)
+                console.log('\\n1. Loading tool...');
                 const t0 = performance.now();
-                const terrainData = await raster.rasterizeModel({
+                const toolData = await raster.loadTool({
+                    triangles: toolTriangles
+                });
+                const toolTime = performance.now() - t0;
+                console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
+
+                // Load terrain (NEW API)
+                console.log('\\n2. Loading terrain...');
+                const t1 = performance.now();
+                const terrainData = await raster.loadTerrain({
                     triangles: terrainTriangles,
                     zFloor: zFloor
                 });
-                const terrainTime = performance.now() - t0;
-                console.log('✓ Model:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
+                const terrainTime = performance.now() - t1;
+                console.log('✓ Terrain:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
 
-                // Rasterize tool
-                console.log('\\n2. Rasterizing tool...');
-                const t1 = performance.now();
-                const toolData = await raster.rasterizeTool({
-                    triangles: toolTriangles
-                });
-                const toolTime = performance.now() - t1;
-                console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
-
-                // Generate toolpaths
+                // Generate toolpaths (NEW API - no need to pass terrainData/toolData)
                 console.log('\\n3. Generating toolpaths...');
                 const t2 = performance.now();
                 const toolpathData = await raster.generateToolpaths({
-                    terrainData: terrainData,
-                    toolData: toolData,
                     xStep: xStep,
                     yStep: yStep,
                     zFloor: zFloor

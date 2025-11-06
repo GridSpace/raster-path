@@ -108,39 +108,37 @@ function createWindow() {
                 await raster.init();
                 console.log('✓ RasterPath initialized');
 
-                console.log('\\n1. Rasterizing model (should use tiling)...');
+                console.log('\\n1. Loading tool (NEW API)...');
                 const t0 = performance.now();
+                const toolData = await raster.loadTool({
+                    triangles: toolTriangles
+                });
+                const toolTime = performance.now() - t0;
+                console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
+
+                console.log('\\n2. Loading terrain (NEW API - should use tiling)...');
+                const t1 = performance.now();
                 let terrainData;
                 let terrainTime;
                 try {
-                    terrainData = await raster.rasterizeModel({
+                    terrainData = await raster.loadTerrain({
                         triangles: terrainTriangles,
                         zFloor: zFloor
                     });
-                    terrainTime = performance.now() - t0;
-                    console.log('✓ Model:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
+                    terrainTime = performance.now() - t1;
+                    console.log('✓ Terrain:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
                 } catch (error) {
-                    console.error('❌ Model rasterization FAILED:', error.message);
+                    console.error('❌ Terrain loading FAILED:', error.message);
                     return {
-                        error: 'Rasterization failed: ' + error.message,
+                        error: 'Terrain loading failed: ' + error.message,
                         expectedTiling: true,
                         resolution: resolution
                     };
                 }
 
-                console.log('\\n2. Rasterizing tool...');
-                const t1 = performance.now();
-                const toolData = await raster.rasterizeTool({
-                    triangles: toolTriangles
-                });
-                const toolTime = performance.now() - t1;
-                console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
-
-                console.log('\\n3. Generating toolpaths...');
+                console.log('\\n3. Generating toolpaths (NEW API)...');
                 const t2 = performance.now();
                 const toolpathData = await raster.generateToolpaths({
-                    terrainData: terrainData,
-                    toolData: toolData,
                     xStep: xStep,
                     yStep: yStep,
                     zFloor: zFloor
