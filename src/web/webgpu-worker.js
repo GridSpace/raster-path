@@ -871,6 +871,26 @@ function createSparseToolFromPoints(points) {
     };
 }
 
+// Generate toolpath with pre-created sparse tool (for batch operations)
+async function generateToolpathWithSparseTools(terrainPoints, sparseToolData, xStep, yStep, oobZ, gridStep, terrainBounds = null, singleScanline = false) {
+    const startTime = performance.now();
+
+    try {
+        // Create height map from terrain points (use terrain bounds if provided)
+        const terrainMapData = createHeightMapFromPoints(terrainPoints, gridStep, terrainBounds);
+
+        // Run WebGPU compute with pre-created sparse tool
+        const result = await runToolpathCompute(
+            terrainMapData, sparseToolData, xStep, yStep, oobZ, startTime
+        );
+
+        return result;
+    } catch (error) {
+        debug.error('Error generating toolpath:', error);
+        throw error;
+    }
+}
+
 // Generate toolpath for a single region (internal)
 async function generateToolpathSingle(terrainPoints, toolPoints, xStep, yStep, oobZ, gridStep, terrainBounds = null) {
     const startTime = performance.now();
@@ -1996,7 +2016,12 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         throw new Error('WebGPU not initialized');
     }
 
-    const startTime = performance.now();
+    const timings = {
+        start: performance.now(),
+        prep: 0,
+        gpu: 0,
+        stitch: 0
+    };
 
     // Calculate grid dimensions based on BUCKET range (not model bounds)
     // Buckets may extend slightly beyond model bounds due to rounding
@@ -2132,6 +2157,10 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     passEncoder.setPipeline(pipeline);
     passEncoder.setBindGroup(0, bindGroup);
 
+    // Prep complete, GPU starting
+    timings.prep = performance.now() - timings.start;
+    const gpuStart = performance.now();
+
     // Dispatch: (numAngles/8, gridYHeight/8, numBuckets)
     const dispatchX = Math.ceil(numAngles / 8);
     const dispatchY = Math.ceil(gridYHeight / 8);
@@ -2167,7 +2196,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     uniformBuffer.destroy();
     stagingBuffer.destroy();
 
-    debug.log(`[Worker] GPU complete: ${(performance.now() - startTime).toFixed(0)}ms`);
+    timings.gpu = performance.now() - gpuStart;
 
     // Stitch strips
     const stitchStart = performance.now();
@@ -2217,8 +2246,15 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
         });
     }
 
-    debug.log(`[Worker] Radial V2 complete: ${(performance.now() - startTime).toFixed(0)}ms, ${strips.length} strips`);
-    return { strips };
+    timings.stitch = performance.now() - stitchStart;
+    const totalTime = performance.now() - timings.start;
+
+    debug.log(`[Worker] Radial V2 complete: ${totalTime.toFixed(0)}ms`);
+    debug.log(`[Worker]   Prep: ${timings.prep.toFixed(0)}ms (${(timings.prep/totalTime*100).toFixed(0)}%)`);
+    debug.log(`[Worker]   GPU:  ${timings.gpu.toFixed(0)}ms (${(timings.gpu/totalTime*100).toFixed(0)}%)`);
+    debug.log(`[Worker]   Stitch: ${timings.stitch.toFixed(0)}ms (${(timings.stitch/totalTime*100).toFixed(0)}%)`);
+
+    return { strips, timings };
 }
 
 // Handle messages from main thread
@@ -2348,6 +2384,10 @@ self.onmessage = async function(e) {
                 debug.log(`[Worker] Rasterized ${radialModelResult.strips.length} strips`);
 
                 // Step 2: Generate toolpath for each strip
+                // Create sparse tool representation ONCE (same for all strips)
+                const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
+                debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
+
                 const stripToolpaths = [];
                 let totalToolpathPoints = 0;
 
@@ -2371,10 +2411,10 @@ self.onmessage = async function(e) {
                         continue;
                     }
 
-                    // Generate toolpath for this strip (single scanline)
-                    const stripToolpathResult = await generateToolpath(
+                    // Generate toolpath for this strip (single scanline) with pre-created sparse tool
+                    const stripToolpathResult = await generateToolpathWithSparseTools(
                         strip.positions,
-                        radialToolData.positions,
+                        sparseToolData,
                         radialXStep,
                         radialYStep,
                         radialToolpathZFloor,
