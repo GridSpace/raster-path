@@ -1991,7 +1991,7 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
 }
 
 // Radial V2: Rasterize model with rotating ray planes and X-bucketing
-async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds, centerOffset, originalBounds) {
+async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds) {
     if (!device) {
         throw new Error('WebGPU not initialized');
     }
@@ -2213,9 +2213,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
             bounds: {
                 min: { x: bucketMinX, y: 0, z: zFloor },
                 max: { x: bucketMaxX, y: toolWidth, z: bounds.max.z }
-            },
-            centerOffset: centerOffset || { y: 0, z: 0 },  // For un-centering in visualization
-            originalBounds: originalBounds || bounds  // Original model bounds before centering
+            }
         });
     }
 
@@ -2293,9 +2291,7 @@ self.onmessage = async function(e) {
                     maxRadius,
                     toolWidth,
                     zFloor: v2ZFloor,
-                    bounds: v2Bounds,
-                    centerOffset,
-                    originalBounds: v2OriginalBounds
+                    bounds: v2Bounds
                 } = data;
                 const v2Result = await radialRasterizeV2(
                     v2Triangles,
@@ -2306,9 +2302,7 @@ self.onmessage = async function(e) {
                     maxRadius,
                     toolWidth,
                     v2ZFloor,
-                    v2Bounds,
-                    centerOffset,
-                    v2OriginalBounds
+                    v2Bounds
                 );
                 // Transfer strip buffers
                 const transferBuffers = v2Result.strips.map(strip => strip.positions.buffer);
