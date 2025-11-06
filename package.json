@@ -34,6 +34,7 @@
     "serve": "npx serve build --config serve.json --listen 9090",
     "test": "npm run test:planar && npm run test:radial",
     "test:planar": "npm run build && npx electron src/test/planar-test.cjs",
+    "test:planar-tiling": "npm run build && npx electron src/test/planar-tiling-test.cjs",
     "test:radial": "npm run build && npx electron src/test/radial-test.cjs",
     "test:radial-v2": "npm run build && npx electron src/test/radial-v2-test.cjs",
     "test:radial-streaming": "npm run build && npx electron src/test/radial-streaming-test.cjs"
