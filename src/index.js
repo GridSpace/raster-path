@@ -132,70 +132,141 @@ export class RasterPath {
     }
 
     /**
-     * Rasterize model mesh to terrain heightmap
+     * Load tool - accepts either triangles (from STL) or sparse data (from Kiri:Moto)
      * @param {object} params - Parameters
-     * @param {Float32Array} params.triangles - Unindexed triangle vertices
-     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
-     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
-     * @param {function} params.onProgress - Optional progress callback (percent, info) => {}
-     * @returns {Promise<object>} Terrain data (format depends on mode)
+     * @param {Float32Array} params.triangles - Optional: Unindexed triangle vertices
+     * @param {object} params.sparseData - Optional: Pre-computed sparse data {bounds, positions, pointCount}
+     * @returns {Promise<object>} Tool data (sparse format: {bounds, positions, pointCount})
      */
-    async rasterizeModel({ triangles, zFloor, boundsOverride, onProgress }) {
+    async loadTool({ triangles, sparseData }) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
 
-        if (this.mode === 'planar') {
-            return this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: false, onProgress });
-        } else {
-            throw new Error('Use rasterizeModelRadial() for radial mode');
+        // If sparse data provided directly (from Kiri:Moto), use it
+        if (sparseData) {
+            this.toolData = sparseData;
+            return sparseData;
         }
-    }
 
-    /**
-     * Rasterize tool mesh
-     * @param {object} params - Parameters
-     * @param {Float32Array} params.triangles - Unindexed triangle vertices
-     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
-     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
-     * @returns {Promise<object>} Tool data (sparse format: [gridX, gridY, Z, ...])
-     */
-    async rasterizeTool({ triangles, zFloor, boundsOverride }) {
-        if (!this.isInitialized) {
-            throw new Error('RasterPath not initialized. Call init() first.');
+        // Otherwise rasterize from triangles
+        if (!triangles) {
+            throw new Error('loadTool() requires either triangles or sparseData');
         }
-        const toolData = await this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: true });
+
+        const toolData = await this.#rasterizePlanar({ triangles, isForTool: true });
         const { bounds, positions } = toolData;
+
+        // Flip Z-axis for tool (tool points down)
         for (let i=0; i<positions.length; i += 3) {
             positions[i+2] = -positions[i+2] - bounds.min.z;
         }
         let swapZ = bounds.min.z;
         bounds.min.z = -bounds.max.z;
         bounds.max.z = -swapZ;
+
+        this.toolData = toolData;
         return toolData;
     }
 
     /**
-     * Generate toolpaths from terrain and tool data
+     * Load terrain - behavior depends on mode
+     * Planar mode: Rasterizes and returns terrain data
+     * Radial mode: Stores triangles for later use in generateToolpaths()
      * @param {object} params - Parameters
-     * @param {object} params.terrainData - Output from rasterizeModel()
-     * @param {object} params.toolData - Output from rasterizeTool()
-     * @param {number} params.xStep - X-axis step size in grid points
-     * @param {number} params.yStep - Y-axis step size in grid points
-     * @param {number} params.zFloor - Z floor value for out-of-bounds
-     * @param {number} params.radiusOffset - Radial only: tool offset above terrain (mm), default 20
+     * @param {Float32Array} params.triangles - Unindexed triangle vertices
+     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
+     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
      * @param {function} params.onProgress - Optional progress callback (percent, info) => {}
-     * @returns {Promise<object>} Toolpath data
+     * @returns {Promise<object|null>} Planar: terrain data {bounds, positions, pointCount}, Radial: null
      */
-    async generateToolpaths({ terrainData, toolData, xStep, yStep, zFloor, radiusOffset = 20, onProgress }) {
+    async loadTerrain({ triangles, zFloor, boundsOverride, onProgress }) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
 
         if (this.mode === 'planar') {
-            return this.#generateToolpathsPlanar({ terrainData, toolData, xStep, yStep, zFloor, onProgress });
+            // Planar: rasterize and return
+            const terrainData = await this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: false, onProgress });
+            this.terrainData = terrainData;
+            return terrainData;
         } else {
-            throw new Error('Use generateToolpathsRadial() for radial mode');
+            // Radial: store triangles and metadata for generateToolpaths()
+            const originalBounds = boundsOverride || this.#calculateBounds(triangles);
+
+            // Center model in YZ plane (required for radial rasterization)
+            const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
+            const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
+
+            let centeredTriangles = triangles;
+            let bounds = originalBounds;
+
+            if (Math.abs(centerY) > 0.001 || Math.abs(centerZ) > 0.001) {
+                debug.log(`Centering model in YZ: offset Y=${centerY.toFixed(3)}, Z=${centerZ.toFixed(3)}`);
+                centeredTriangles = new Float32Array(triangles.length);
+                for (let i = 0; i < triangles.length; i += 3) {
+                    centeredTriangles[i] = triangles[i];                    // X unchanged
+                    centeredTriangles[i + 1] = triangles[i + 1] - centerY;  // Center Y
+                    centeredTriangles[i + 2] = triangles[i + 2] - centerZ;  // Center Z
+                }
+                bounds = this.#calculateBounds(centeredTriangles);
+            }
+
+            // Store for generateToolpaths()
+            this.terrainTriangles = centeredTriangles;
+            this.terrainBounds = bounds;
+            this.terrainZFloor = zFloor ?? 0;
+
+            return null;
+        }
+    }
+
+    /**
+     * Generate toolpaths from loaded terrain and tool
+     * Must call loadTool() and loadTerrain() first
+     * @param {object} params - Parameters
+     * @param {number} params.xStep - X-axis step size in grid points
+     * @param {number} params.yStep - Y-axis step size in grid points
+     * @param {number} params.zFloor - Z floor value for out-of-bounds
+     * @param {number} params.radiusOffset - Radial only: tool offset above terrain (mm), default 20
+     * @param {function} params.onProgress - Optional progress callback (percent, info) => {}
+     * @returns {Promise<object>} Toolpath data (format depends on mode)
+     */
+    async generateToolpaths({ xStep, yStep, zFloor, radiusOffset = 20, onProgress }) {
+        if (!this.isInitialized) {
+            throw new Error('RasterPath not initialized. Call init() first.');
+        }
+
+        if (!this.toolData) {
+            throw new Error('Tool not loaded. Call loadTool() first.');
+        }
+
+        if (this.mode === 'planar') {
+            if (!this.terrainData) {
+                throw new Error('Terrain not loaded. Call loadTerrain() first.');
+            }
+            return this.#generateToolpathsPlanar({
+                terrainData: this.terrainData,
+                toolData: this.toolData,
+                xStep,
+                yStep,
+                zFloor,
+                onProgress
+            });
+        } else {
+            // Radial mode: use stored triangles
+            if (!this.terrainTriangles) {
+                throw new Error('Terrain not loaded. Call loadTerrain() first.');
+            }
+            return this.#generateToolpathsRadial({
+                triangles: this.terrainTriangles,
+                bounds: this.terrainBounds,
+                toolData: this.toolData,
+                xStep,
+                yStep,
+                zFloor: zFloor ?? this.terrainZFloor,
+                onProgress
+            });
         }
     }
 
@@ -209,6 +280,12 @@ export class RasterPath {
             this.isInitialized = false;
             this.messageHandlers.clear();
             this.deviceCapabilities = null;
+            // Clear loaded data
+            this.toolData = null;
+            this.terrainData = null;
+            this.terrainTriangles = null;
+            this.terrainBounds = null;
+            this.terrainZFloor = null;
         }
     }
 
@@ -272,208 +349,19 @@ export class RasterPath {
         });
     }
 
-    // ============================================================================
-    // Radial V2 Methods
-    // ============================================================================
+    async #generateToolpathsRadial({ triangles, bounds, toolData, xStep, yStep, zFloor, onProgress }) {
+        const maxRadius = this.#calculateMaxRadius(triangles);
 
-    /**
-     * Radial mode: Rasterize model into angular strips
-     * @param {object} params - Parameters
-     * @param {Float32Array} params.triangles - Unindexed triangle vertices
-     * @param {object} params.toolData - Tool data (required for maxRadius calculation)
-     * @param {number} params.zFloor - Z floor for out-of-bounds (optional)
-     * @param {object} params.boundsOverride - Optional bounding box {min: {x, y, z}, max: {x, y, z}}
-     * @param {function} params.onProgress - Optional progress callback (angle, totalAngles) => {}
-     * @returns {Promise<Array>} Array of strip objects [{angle, positions, gridWidth, gridHeight, bounds}, ...]
-     */
-    async rasterizeModelRadial({ triangles, toolData, zFloor, boundsOverride, onProgress }) {
-        if (!this.isInitialized) {
-            throw new Error('RasterPath not initialized. Call init() first.');
-        }
-        if (this.mode !== 'radial') {
-            throw new Error('rasterizeModelRadial() only works in radial mode');
-        }
-        if (!toolData) {
-            throw new Error('toolData is required for radial rasterization (tool must be loaded first)');
-        }
-
-        // Calculate bounds
-        const originalBounds = boundsOverride || this.#calculateBounds(triangles);
-
-        // Center model in YZ plane (required for radial rasterization)
-        const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
-        const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
-
-        let centeredTriangles = triangles;
-        let bounds = originalBounds;
-
-        if (Math.abs(centerY) > 0.001 || Math.abs(centerZ) > 0.001) {
-            debug.log(`[RasterPath] Centering model in YZ: offset Y=${centerY.toFixed(3)}, Z=${centerZ.toFixed(3)}`);
-            centeredTriangles = new Float32Array(triangles.length);
-            for (let i = 0; i < triangles.length; i += 3) {
-                centeredTriangles[i] = triangles[i];                    // X unchanged
-                centeredTriangles[i + 1] = triangles[i + 1] - centerY;  // Center Y
-                centeredTriangles[i + 2] = triangles[i + 2] - centerZ;  // Center Z
-            }
-            // Recalculate bounds after centering
-            bounds = this.#calculateBounds(centeredTriangles);
-        }
-
-        const maxRadius = this.#calculateMaxRadius(centeredTriangles);
-
-        // Calculate tool width from toolData bounds
+        // Calculate tool width for radial strips
         const toolWidth = Math.max(
-            toolData.bounds.max.y - toolData.bounds.min.y,
-            toolData.bounds.max.z - toolData.bounds.min.z
-        );
-
-        // Create X-buckets for triangle attention
-        const bucketWidth = 1.0; // mm - smaller buckets = better load balancing (was 2.0mm)
-        const bucketData = this.#bucketTrianglesByX(centeredTriangles, bounds, bucketWidth);
-
-        // Calculate number of angles - full 360° rotation
-        const numAngles = Math.ceil(360 / this.rotationStep);
-
-        // Send to worker for GPU processing
-        const result = await new Promise((resolve, reject) => {
-            const handler = (data) => resolve(data);
-
-            this.#sendMessage(
-                'radial-rasterize-v2',
-                {
-                    triangles: centeredTriangles,
-                    bucketData,
-                    resolution: this.resolution,
-                    angleStep: this.rotationStep,
-                    numAngles,
-                    maxRadius: maxRadius * 1.01, // Safety margin
-                    toolWidth,
-                    zFloor: zFloor ?? 0,
-                    bounds
-                },
-                'radial-rasterize-v2-complete',
-                handler
-            );
-        });
-
-        // Stitch strips (result.strips is array of {angle, positions, gridWidth, gridHeight, bounds})
-        return result.strips;
-    }
-
-    /**
-     * Radial mode: Generate toolpaths from strips (DEPRECATED - use rasterizeAndGenerateToolpathsRadial)
-     * @param {object} params - Parameters
-     * @param {Array} params.strips - Output from rasterizeModelRadial()
-     * @param {object} params.toolData - Output from rasterizeTool()
-     * @param {number} params.xStep - X-axis step size in grid points
-     * @param {number} params.yStep - Y-axis step size in grid points
-     * @param {number} params.zFloor - Z floor value for out-of-bounds
-     * @param {function} params.onProgress - Optional progress callback (current, total) => {}
-     * @returns {Promise<object>} Combined toolpath data { strips: [{angle, pathData, ...}, ...], totalPoints }
-     */
-    async generateToolpathsRadial({ strips, toolData, xStep, yStep, zFloor, onProgress }) {
-        if (!this.isInitialized) {
-            throw new Error('RasterPath not initialized. Call init() first.');
-        }
-        if (this.mode !== 'radial') {
-            throw new Error('generateToolpathsRadial() only works in radial mode');
-        }
-
-        // Use worker's optimized batch radial toolpath processing
-        // This creates sparse tool once and reuses GPU buffers for all strips
-        return new Promise((resolve, reject) => {
-            const messageHandler = (e) => {
-                if (e.data.type === 'toolpath-complete') {
-                    this.worker.removeEventListener('message', messageHandler);
-                    this.worker.removeEventListener('message', progressHandler);
-                    resolve(e.data.result);
-                } else if (e.data.type === 'error') {
-                    this.worker.removeEventListener('message', messageHandler);
-                    this.worker.removeEventListener('message', progressHandler);
-                    reject(new Error(e.data.error));
-                }
-            };
-
-            const progressHandler = (e) => {
-                if (e.data.type === 'toolpath-progress' && onProgress) {
-                    onProgress(e.data.data.current, e.data.data.total);
-                }
-            };
-
-            this.worker.addEventListener('message', messageHandler);
-            this.worker.addEventListener('message', progressHandler);
-
-            this.worker.postMessage({
-                type: 'generate-toolpaths-radial',
-                data: {
-                    modelResult: { strips },
-                    toolData,
-                    xStep,
-                    yStep,
-                    zFloor,
-                    resolution: this.resolution,
-                    bounds: toolData.bounds,
-                    gridStep: this.resolution
-                }
-            });
-        });
-    }
-
-    /**
-     * Radial mode: Complete pipeline - rasterize model + generate toolpaths (ALL IN WORKER)
-     * This is more efficient than separate calls as it avoids transferring intermediate strip data
-     * @param {object} params - Parameters
-     * @param {Float32Array} params.triangles - Model triangles
-     * @param {object} params.toolData - Output from rasterizeTool()
-     * @param {number} params.xStep - X-axis step size in grid points
-     * @param {number} params.yStep - Y-axis step size in grid points
-     * @param {number} params.zFloor - Z floor value for out-of-bounds
-     * @param {function} params.onProgress - Optional progress callback (current, total) => {}
-     * @returns {Promise<object>} Toolpath data { strips: [{angle, pathData, ...}, ...], totalPoints, numStrips }
-     */
-    async rasterizeAndGenerateToolpathsRadial({ triangles, toolData, xStep, yStep, zFloor, onProgress }) {
-        if (!this.isInitialized) {
-            throw new Error('RasterPath not initialized. Call init() first.');
-        }
-        if (this.mode !== 'radial') {
-            throw new Error('rasterizeAndGenerateToolpathsRadial() only works in radial mode');
-        }
-
-        // Calculate bounds
-        const originalBounds = this.#calculateBounds(triangles);
-
-        // Center model in YZ plane (required for radial rasterization)
-        const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
-        const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
-
-        let centeredTriangles = triangles;
-        let bounds = originalBounds;
-
-        if (Math.abs(centerY) > 0.001 || Math.abs(centerZ) > 0.001) {
-            debug.log(`[RasterPath] Centering model in YZ: offset Y=${centerY.toFixed(3)}, Z=${centerZ.toFixed(3)}`);
-            centeredTriangles = new Float32Array(triangles.length);
-            for (let i = 0; i < triangles.length; i += 3) {
-                centeredTriangles[i] = triangles[i];                    // X unchanged
-                centeredTriangles[i + 1] = triangles[i + 1] - centerY;  // Center Y
-                centeredTriangles[i + 2] = triangles[i + 2] - centerZ;  // Center Z
-            }
-            // Recalculate bounds after centering
-            bounds = this.#calculateBounds(centeredTriangles);
-        }
-
-        const maxRadius = this.#calculateMaxRadius(centeredTriangles);
-
-        // Calculate tool width for radial strips (bounds are in mm, not grid cells)
-        const toolBounds = toolData.bounds;
-        const toolWidth = Math.max(
-            Math.abs(toolBounds.max.y - toolBounds.min.y),
-            Math.abs(toolBounds.max.x - toolBounds.min.x)
+            Math.abs(toolData.bounds.max.y - toolData.bounds.min.y),
+            Math.abs(toolData.bounds.max.x - toolData.bounds.min.x)
         );
 
         // Build X-bucketing data - full 360° rotation
         const numAngles = Math.ceil(360 / this.rotationStep);
-        const bucketWidth = 1.0; // mm - smaller buckets = better load balancing (was 2.0mm)
-        const bucketData = this.#bucketTrianglesByX(centeredTriangles, bounds, bucketWidth);
+        const bucketWidth = 1.0; // mm - smaller buckets = better load balancing
+        const bucketData = this.#bucketTrianglesByX(triangles, bounds, bucketWidth);
 
         return new Promise((resolve, reject) => {
             // Setup progress handler
@@ -497,7 +385,7 @@ export class RasterPath {
             this.#sendMessage(
                 'radial-generate-toolpaths',
                 {
-                    triangles: centeredTriangles,
+                    triangles: triangles,
                     bucketData,
                     toolData,
                     resolution: this.resolution,
@@ -505,7 +393,7 @@ export class RasterPath {
                     numAngles,
                     maxRadius: maxRadius * 1.01,
                     toolWidth,
-                    zFloor: zFloor ?? 0,
+                    zFloor: zFloor,
                     bounds,
                     xStep,
                     yStep,

@@ -277,50 +277,48 @@ async function rasterizeAll() {
         // Ensure RasterPath is initialized with current settings
         await initRasterPath();
 
+        // Load tool (works for both modes)
+        if (toolTriangles) {
+            updateInfo('Loading tool...');
+            const t0 = performance.now();
+            toolRasterData = await rasterPath.loadTool({
+                triangles: toolTriangles
+            });
+            const t1 = performance.now();
+            updateInfo(`Tool loaded in ${(t1 - t0).toFixed(0)}ms`);
+        }
+
         if (mode === 'planar') {
-            // Planar mode: rasterize in any order
+            // Planar mode: rasterize terrain immediately
             if (modelTriangles) {
-                updateInfo('Rasterizing model...');
+                updateInfo('Rasterizing terrain...');
                 const t0 = performance.now();
-                modelRasterData = await rasterPath.rasterizeModel({
+                modelRasterData = await rasterPath.loadTerrain({
                     triangles: modelTriangles,
                     zFloor: zFloor
                 });
                 const t1 = performance.now();
-                updateInfo(`Model rasterized in ${(t1 - t0).toFixed(0)}ms`);
-            }
-
-            if (toolTriangles) {
-                updateInfo('Rasterizing tool...');
-                const t0 = performance.now();
-                toolRasterData = await rasterPath.rasterizeTool({
-                    triangles: toolTriangles,
-                    zFloor: zFloor
-                });
-                const t1 = performance.now();
-                updateInfo(`Tool rasterized in ${(t1 - t0).toFixed(0)}ms`);
+                updateInfo(`Terrain rasterized in ${(t1 - t0).toFixed(0)}ms`);
             }
         } else {
-            // Radial mode: MUST rasterize tool FIRST, then model
+            // Radial mode: MUST load tool FIRST
             if (!toolTriangles) {
                 updateInfo('Error: Radial mode requires tool to be loaded first');
                 return;
             }
 
-            // Rasterize tool only (model is rasterized during toolpath generation)
-            updateInfo('Rasterizing tool...');
-            const t0 = performance.now();
-            toolRasterData = await rasterPath.rasterizeTool({
-                triangles: toolTriangles,
-                zFloor: zFloor
-            });
-            const t1 = performance.now();
-            updateInfo(`Tool rasterized in ${(t1 - t0).toFixed(0)}ms`);
-
-            if (!modelTriangles) {
-                updateInfo('Tool rasterized. Load model and click "Generate Toolpath" to continue.');
+            // Load terrain (stores triangles for later, doesn't rasterize yet)
+            if (modelTriangles) {
+                updateInfo('Loading terrain...');
+                const t0 = performance.now();
+                await rasterPath.loadTerrain({
+                    triangles: modelTriangles,
+                    zFloor: zFloor
+                });
+                const t1 = performance.now();
+                updateInfo(`Terrain loaded in ${(t1 - t0).toFixed(0)}ms (will rasterize during toolpath generation)`);
             } else {
-                updateInfo('Tool rasterized. Click "Generate Toolpath" to process model.');
+                updateInfo('Tool loaded. Load model and click "Generate Toolpath" to continue.');
             }
 
             // Update button states for radial mode
@@ -343,17 +341,19 @@ async function rasterizeAll() {
 }
 
 async function generateToolpath() {
+    // Check if tool and terrain are loaded (unified check for both modes)
+    if (!toolRasterData) {
+        updateInfo('Tool must be loaded first');
+        return;
+    }
+
     if (mode === 'planar') {
-        if (!modelRasterData || !toolRasterData) {
-            updateInfo('Both model and tool must be rasterized first');
+        if (!modelRasterData) {
+            updateInfo('Model must be rasterized first');
             return;
         }
     } else {
-        // Radial mode: only need tool rasterized, model is rasterized here
-        if (!toolRasterData) {
-            updateInfo('Tool must be rasterized first');
-            return;
-        }
+        // Radial mode: terrain must be loaded (stored internally)
         if (!modelTriangles) {
             updateInfo('Model STL must be loaded');
             return;
@@ -362,37 +362,21 @@ async function generateToolpath() {
 
     try {
         const t0 = performance.now();
+        updateInfo('Generating toolpath...');
+
+        // Unified API - works for both modes!
+        toolpathData = await rasterPath.generateToolpaths({
+            xStep: xStep,
+            yStep: yStep,
+            zFloor: zFloor
+        });
+
+        const t1 = performance.now();
 
         if (mode === 'planar') {
-            updateInfo('Generating toolpath...');
-            toolpathData = await rasterPath.generateToolpaths({
-                terrainData: modelRasterData,
-                toolData: toolRasterData,
-                xStep: xStep,
-                yStep: yStep,
-                zFloor: zFloor
-            });
-
-            const t1 = performance.now();
             const numPoints = toolpathData.pathData.length;
             updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
         } else {
-            // Radial mode: Complete pipeline in worker (rasterize + generate toolpath)
-
-            // Note: Model centering is now handled automatically by rasterizeAndGenerateToolpathsRadial()
-            let trianglesToProcess = modelTriangles;
-
-            // Complete pipeline in worker (more efficient, avoids race conditions)
-            updateInfo('Processing radial toolpath (rasterize + generate)...');
-            toolpathData = await rasterPath.rasterizeAndGenerateToolpathsRadial({
-                triangles: trianglesToProcess,
-                toolData: toolRasterData,
-                xStep: xStep,
-                yStep: yStep,
-                zFloor: zFloor
-            });
-
-            const t1 = performance.now();
             console.log('Radial toolpaths generated:', toolpathData);
             console.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
             updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
