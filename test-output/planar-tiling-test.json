@@ -1,0 +1,18 @@
+{
+  "parameters": {
+    "resolution": 0.01,
+    "expectedMemoryMB": 38147
+  },
+  "result": {
+    "terrainPoints": 56167488,
+    "toolPoints": 195161,
+    "toolpathSize": 56167488,
+    "checksum": 0
+  },
+  "timing": {
+    "terrain": 842.0999999940395,
+    "tool": 13.800000011920929,
+    "toolpath": 1075.0999999940395,
+    "total": 1931
+  }
+}

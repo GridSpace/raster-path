@@ -1,6 +1,6 @@
 // radial-test.cjs
 // Regression test for radial mode using new RasterPath API
-// Tests: rasterizeModel() + rasterizeTool() + generateToolpaths() with radial projection
+// Tests: loadTool() + loadTerrain() + generateToolpaths() with radial projection
 
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
@@ -105,77 +105,62 @@ function createWindow() {
                 await raster.init();
                 console.log('✓ RasterPath initialized');
 
-                // Rasterize model (terrain) with radial projection
-                console.log('\\n1. Rasterizing model (radial)...');
+                // Load tool (NEW API)
+                console.log('\\n1. Loading tool (NEW API)...');
                 const t0 = performance.now();
-                const terrainData = await raster.rasterizeModel({
+                const toolData = await raster.loadTool({
+                    triangles: toolTriangles
+                });
+                const toolTime = performance.now() - t0;
+                console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
+
+                // Load terrain (NEW API - stores triangles for later)
+                console.log('\\n2. Loading terrain (NEW API - radial mode)...');
+                const t1 = performance.now();
+                await raster.loadTerrain({
                     triangles: terrainTriangles,
                     zFloor: zFloor
                 });
-                const terrainTime = performance.now() - t0;
-                console.log('✓ Model rasterized');
-                if (terrainData.tiles) {
-                    console.log('  Tiles:', terrainData.tiles.length);
-                    console.log('  Grid:', terrainData.tiles[0].gridWidth, 'x', terrainData.tiles[0].gridHeight);
-                } else {
-                    console.log('  Grid:', terrainData.gridWidth, 'x', terrainData.gridHeight);
-                }
-                console.log('  Circumference:', terrainData.circumference.toFixed(2), 'mm');
-                console.log('  Max radius:', terrainData.maxRadius.toFixed(2), 'mm');
+                const terrainTime = performance.now() - t1;
+                console.log('✓ Terrain loaded (triangles stored, will rasterize during toolpath generation)');
                 console.log('  Time:', terrainTime.toFixed(1), 'ms');
 
-                // Rasterize tool (planar)
-                console.log('\\n2. Rasterizing tool (planar)...');
-                const t1 = performance.now();
-                const toolData = await raster.rasterizeTool({
-                    triangles: toolTriangles
-                });
-                const toolTime = performance.now() - t1;
-                console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
-
-                // Generate toolpaths (morphs tool + stitches terrain + generates paths)
-                console.log('\\n3. Generating toolpaths (radial)...');
+                // Generate toolpaths (NEW API - does rasterization + toolpath generation)
+                console.log('\\n3. Generating toolpaths (NEW API - radial)...');
                 const t2 = performance.now();
                 const toolpathData = await raster.generateToolpaths({
-                    terrainData: terrainData,
-                    toolData: toolData,
                     xStep: xStep,
                     yStep: yStep,
                     zFloor: zFloor,
                     radiusOffset: radiusOffset
                 });
                 const toolpathTime = performance.now() - t2;
-                console.log('✓ Toolpath:', toolpathData.numScanlines + 'x' + toolpathData.pointsPerLine, '=', toolpathData.pathData.length, 'Z-values');
+                console.log('✓ Toolpath generated');
+                console.log('  Strips:', toolpathData.numStrips);
+                console.log('  Total points:', toolpathData.totalPoints);
                 console.log('  Generation time:', toolpathTime.toFixed(1), 'ms');
 
                 // Cleanup
                 raster.terminate();
 
-                // Calculate checksum for regression detection
+                // Calculate checksum for regression detection (NEW API - radial mode uses strips)
                 let checksum = 0;
-                for (let i = 0; i < toolpathData.pathData.length; i++) {
-                    checksum = (checksum + toolpathData.pathData[i] * (i + 1)) | 0;
-                }
-
-                // Sample first 30 Z-values for debugging
-                const sampleSize = Math.min(30, toolpathData.pathData.length);
-                const sampleValues = [];
-                for (let i = 0; i < sampleSize; i++) {
-                    sampleValues.push(toolpathData.pathData[i].toFixed(2));
-                }
-
-                // Calculate total terrain cells for reporting
-                let totalTerrainCells = 0;
-                let terrainTiles = 0;
-                if (terrainData.tiles) {
-                    terrainTiles = terrainData.tiles.length;
-                    for (const tile of terrainData.tiles) {
-                        totalTerrainCells += tile.gridWidth * tile.gridHeight;
+                let totalValues = 0;
+                for (const strip of toolpathData.strips) {
+                    for (let i = 0; i < strip.pathData.length; i++) {
+                        checksum = (checksum + strip.pathData[i] * (totalValues + i + 1)) | 0;
                     }
-                } else {
-                    // Non-tiled dense array
-                    totalTerrainCells = terrainData.pointCount;
-                    terrainTiles = 1;
+                    totalValues += strip.pathData.length;
+                }
+
+                // Sample first 30 Z-values for debugging (from first strip)
+                const firstStrip = toolpathData.strips[0];
+                const sampleSize = Math.min(30, firstStrip ? firstStrip.pathData.length : 0);
+                const sampleValues = [];
+                if (firstStrip) {
+                    for (let i = 0; i < sampleSize; i++) {
+                        sampleValues.push(firstStrip.pathData[i].toFixed(2));
+                    }
                 }
 
                 return {
@@ -193,14 +178,9 @@ function createWindow() {
                             toolTriangles: toolTriangles.length / 9
                         },
                         result: {
-                            terrainCells: totalTerrainCells,
-                            terrainTiles: terrainTiles,
-                            circumference: terrainData.circumference,
-                            maxRadius: terrainData.maxRadius,
                             toolPoints: toolData.pointCount,
-                            toolpathSize: toolpathData.pathData.length,
-                            numScanlines: toolpathData.numScanlines,
-                            pointsPerLine: toolpathData.pointsPerLine,
+                            numStrips: toolpathData.numStrips,
+                            totalPoints: toolpathData.totalPoints,
                             checksum: checksum,
                             sampleValues: sampleValues
                         },

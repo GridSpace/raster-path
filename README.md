@@ -4,46 +4,80 @@ Fast browser-based terrain + tool path generator using WebGPU compute shaders.
 
 ## Features
 
-- **STL to Point Cloud**: Convert STL files to point meshes using GPU-accelerated XY rastering
+- **Dual Mode Rasterization**: Planar (traditional XY grid) and Radial (cylindrical unwrap) modes
 - **CNC Toolpath Generation**: Generate toolpaths by simulating tool movement over terrain
 - **GPU Accelerated**: 20-100× faster than CPU-based solutions
-- **ESM Module**: Clean, importable package for browser applications
+- **Unified API**: Clean three-method interface that works uniformly across both modes
+- **ESM Module**: Importable package for browser applications
 
 ## Quick Start
 
 ### As a Module
 
 ```javascript
-import { RasterPath } from 'raster-path';
+import { RasterPath } from '@gridspace/raster-path';
 
-// Initialize WebGPU
-const converter = new RasterPath();
-await converter.init();
+// Initialize for planar mode
+const raster = new RasterPath({
+    mode: 'planar',
+    resolution: 0.1  // 0.1mm grid resolution
+});
+await raster.init();
 
-// Load and convert STL
-const response = await fetch('model.stl');
-const stlBuffer = await response.arrayBuffer();
+// 1. Load tool (from STL triangles)
+const toolTriangles = parseSTL(toolSTLBuffer);
+const toolData = await raster.loadTool({
+    triangles: toolTriangles
+});
 
-const result = await converter.rasterizeSTL(
-    stlBuffer,
-    0.5,  // step size (mm)
-    0     // filter mode: 0=max Z (terrain), 1=min Z (tool)
-);
+// 2. Load terrain (rasterizes immediately in planar mode)
+const terrainTriangles = parseSTL(terrainSTLBuffer);
+const terrainData = await raster.loadTerrain({
+    triangles: terrainTriangles,
+    zFloor: -100
+});
 
-console.log(`Converted to ${result.pointCount} points`);
+// 3. Generate toolpaths
+const toolpathData = await raster.generateToolpaths({
+    xStep: 5,    // Sample every 5th point in X
+    yStep: 5,    // Sample every 5th point in Y
+    zFloor: -100
+});
 
-// Generate toolpath
-const toolpath = await converter.generateToolpath(
-    terrainResult.positions,
-    toolResult.positions,
-    5,      // xStep
-    5,      // yStep
-    -100,   // zFloor
-    0.5     // gridStep
-);
+console.log(`Generated ${toolpathData.pathData.length} toolpath points`);
 
 // Cleanup
-converter.dispose();
+raster.terminate();
+```
+
+### Radial Mode (for cylindrical parts)
+
+```javascript
+// Initialize for radial mode
+const raster = new RasterPath({
+    mode: 'radial',
+    resolution: 0.1,      // Radial resolution (mm)
+    rotationStep: 1.0     // 1 degree between rays
+});
+await raster.init();
+
+// Load tool and terrain (same API!)
+await raster.loadTool({ triangles: toolTriangles });
+await raster.loadTerrain({
+    triangles: terrainTriangles,
+    zFloor: 0
+});
+
+// Generate toolpaths with radius offset
+const toolpathData = await raster.generateToolpaths({
+    xStep: 5,
+    yStep: 5,
+    zFloor: 0,
+    radiusOffset: 20  // Tool offset above surface (radial mode only)
+});
+
+// Output is array of strips (one per rotation angle)
+console.log(`Generated ${toolpathData.numStrips} strips, ${toolpathData.totalPoints} points`);
 ```
 
 ### Demo UI
@@ -57,19 +91,25 @@ Open http://localhost:3000 and drag STL files onto the interface.
 
 ## Algorithm
 
-### XY Rastering (STL → Point Cloud)
+### Planar Mode (XY Grid Rasterization)
 
-1. Calculate bounding box and filter triangles by surface normal
-2. Create XY grid at specified step size (0.05mm - 1.0mm)
-3. For each grid point, find triangle intersections along Z axis
-4. Keep max Z (terrain) or min Z (tool) intersection per grid point
+1. **Tool Rasterization**: Create XY grid at specified resolution and rasterize tool geometry (keeps min Z per grid cell)
+2. **Terrain Rasterization**: Rasterize terrain geometry on matching XY grid (keeps max Z per grid cell)
+3. **Toolpath Generation**:
+   - Scan tool over terrain in XY grid with configurable step sizes (xStep, yStep)
+   - At each position, calculate minimum Z-offset where tool doesn't collide with terrain
+   - Output scanline-based toolpath as array of Z-heights
 
-### Toolpath Generation
+### Radial Mode (Cylindrical Rasterization)
 
-1. Convert point clouds to indexed 2D grids
-2. Scan tool over terrain in XY grid
-3. Calculate collision at each position (minimum delta between tool and terrain)
-4. Output tool center Z heights as scanline-based toolpath
+1. **Tool Rasterization**: Rasterize tool in planar mode (same as above)
+2. **Terrain Preparation**: Center terrain in YZ plane and store triangles
+3. **Toolpath Generation**:
+   - Cast rays from origin at specified rotation angles (e.g., every 1°)
+   - For each ray, rasterize terrain triangles along that angle
+   - Use X-bucketing optimization to partition triangles spatially
+   - Calculate tool-terrain collisions along each radial strip
+   - Output array of strips (one per angle), each containing Z-heights along X-axis
 
 ## Performance
 
@@ -86,73 +126,145 @@ Example (84×84×28mm model, 6,120 triangles):
 
 ```
 src/
-  index.js                    # Main ESM export
+  index.js                    # Main RasterPath API (ESM export)
   web/
-    webgpu-worker.js         # WebGPU worker (rasterization & toolpath)
-    index.html               # Demo UI
-    main.js                  # Demo app
-    styles.css
+    webgpu-worker.js         # WebGPU worker (GPU compute shaders)
+    app.js                   # Demo web application
+    index.html               # Demo UI entry point
+    style.css                # Demo styles
+    parse-stl.js             # STL file parser utility
   test/
-    generate-hemisphere.js   # Test fixture generator
+    planar-test.cjs          # Planar mode regression test
+    planar-tiling-test.cjs   # Planar high-resolution test
+    radial-test.cjs          # Radial mode regression test
+  benchmark/
+    fixtures/                # Test STL files (terrain.stl, tool.stl)
+build/                        # Built files (generated by npm run build)
 ```
 
 ## API Reference
 
 ### `RasterPath`
 
+Constructor: `new RasterPath(options)`
+
+**Options**:
+- `mode` (string): `'planar'` or `'radial'`
+- `resolution` (number): Grid resolution in mm (e.g., 0.1)
+- `rotationStep` (number, radial only): Degrees between rays (e.g., 1.0)
+
 #### `async init()`
-Initialize WebGPU worker. Must be called before processing.
+Initialize WebGPU worker. Must be called before other methods.
 
-**Returns**: `Promise<boolean>` - Success status
+**Returns**: `Promise<void>`
 
-#### `async rasterizeMesh(triangles, stepSize, filterMode, boundsOverride)`
-Rasterize triangle mesh to height map. Accepts geometry from any source (Three.js, procedural, etc.).
-
-**Parameters**:
-- `triangles` (Float32Array): Unindexed triangle positions (9 floats per triangle: v0.xyz, v1.xyz, v2.xyz)
-- `stepSize` (number): Grid resolution in mm (e.g., 0.5)
-- `filterMode` (number): 0 for max Z (terrain), 1 for min Z (tool)
-- `boundsOverride` (object, optional): Bounding box {min: {x, y, z}, max: {x, y, z}}
-
-**Returns**: `Promise<{positions: Float32Array, pointCount: number, bounds: object}>`
-
-**Example with Three.js**:
+**Example**:
 ```javascript
-// Get unindexed positions from Three.js geometry
-const geometry = new THREE.BoxGeometry(10, 10, 10);
-const positions = geometry.attributes.position.array;
-
-const result = await converter.rasterizeMesh(
-    positions,
-    0.5,  // step size
-    0     // max Z filter
-);
+const raster = new RasterPath({ mode: 'planar', resolution: 0.1 });
+await raster.init();
 ```
 
-#### `async rasterizeSTL(stlBuffer, stepSize, filterMode, boundsOverride)`
-Convenience wrapper that parses STL and calls `rasterizeMesh()`.
+---
+
+#### `async loadTool({ triangles, sparseData })`
+Load tool geometry for toolpath generation.
+
+**Parameters** (one required):
+- `triangles` (Float32Array, optional): STL triangle data (9 floats per triangle: v0.xyz, v1.xyz, v2.xyz)
+- `sparseData` (object, optional): Pre-computed raster data with `{ bounds, positions, pointCount }`
+
+**Returns**: `Promise<object>` - Tool raster data with `{ bounds, positions, pointCount }`
+
+**Example**:
+```javascript
+// From STL triangles
+const toolData = await raster.loadTool({
+    triangles: toolTriangles
+});
+
+// From pre-computed sparse data (Kiri:Moto integration)
+const toolData = await raster.loadTool({
+    sparseData: { bounds, positions, pointCount }
+});
+```
+
+---
+
+#### `async loadTerrain({ triangles, zFloor, boundsOverride, onProgress })`
+Load terrain geometry. Behavior depends on mode:
+- **Planar mode**: Rasterizes immediately and returns terrain data
+- **Radial mode**: Stores triangles for later, returns `null`
 
 **Parameters**:
-- `stlBuffer` (ArrayBuffer): Binary STL data
-- Other parameters: Same as `rasterizeMesh()`
+- `triangles` (Float32Array): STL triangle data
+- `zFloor` (number, optional): Z floor value for out-of-bounds areas
+- `boundsOverride` (object, optional): Override bounding box `{min: {x, y, z}, max: {x, y, z}}`
+- `onProgress` (function, optional): Progress callback `(progress: number) => void`
 
-**Returns**: `Promise<{positions: Float32Array, pointCount: number, bounds: object}>`
+**Returns**:
+- Planar mode: `Promise<object>` - Terrain raster data with `{ bounds, positions, pointCount }`
+- Radial mode: `Promise<null>`
 
-#### `async generateToolpath(terrainPositions, toolPositions, xStep, yStep, zFloor, gridStep)`
-Generate CNC toolpath from terrain and tool point clouds.
+**Example**:
+```javascript
+// Planar mode - returns terrain data immediately
+const terrainData = await raster.loadTerrain({
+    triangles: terrainTriangles,
+    zFloor: -100
+});
+
+// Radial mode - stores for later
+await raster.loadTerrain({
+    triangles: terrainTriangles,
+    zFloor: 0
+});
+```
+
+---
+
+#### `async generateToolpaths({ xStep, yStep, zFloor, radiusOffset, onProgress })`
+Generate toolpaths from loaded tool and terrain. Must call `loadTool()` and `loadTerrain()` first.
 
 **Parameters**:
-- `terrainPositions` (Float32Array): Terrain point cloud
-- `toolPositions` (Float32Array): Tool point cloud
-- `xStep` (number): X-axis step size
-- `yStep` (number): Y-axis step size
-- `zFloor` (number): Z floor value for out-of-bounds
-- `gridStep` (number): Grid resolution in mm
+- `xStep` (number): Sample every Nth point in X direction
+- `yStep` (number): Sample every Nth point in Y direction
+- `zFloor` (number): Z floor value for out-of-bounds areas
+- `radiusOffset` (number, radial only): Tool offset above surface (mm)
+- `onProgress` (function, optional): Progress callback `(progress: number) => void`
 
-**Returns**: `Promise<{pathData: Float32Array, numScanlines: number, pointsPerLine: number, generationTime: number}>`
+**Returns**:
+- Planar mode: `Promise<object>` with:
+  - `pathData` (Float32Array): Z-heights in scanline order
+  - `width` (number): Points per scanline
+  - `height` (number): Number of scanlines
 
-#### `dispose()`
-Terminate worker and cleanup resources.
+- Radial mode: `Promise<object>` with:
+  - `strips` (Array): Array of strip objects, each containing:
+    - `angle` (number): Rotation angle in degrees
+    - `pathData` (Float32Array): Z-heights along X-axis
+  - `numStrips` (number): Total number of strips
+  - `totalPoints` (number): Sum of all points across strips
+
+**Example**:
+```javascript
+// Works for both planar and radial modes!
+const toolpathData = await raster.generateToolpaths({
+    xStep: 5,
+    yStep: 5,
+    zFloor: -100,
+    radiusOffset: 20  // radial mode only
+});
+```
+
+---
+
+#### `terminate()`
+Terminate WebGPU worker and cleanup resources.
+
+**Example**:
+```javascript
+raster.terminate();
+```
 
 ## Requirements
 
