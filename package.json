@@ -1,6 +1,7 @@
 {
   "name": "@gridspace/raster-path",
-  "version": "1.0.2",
+  "version": "1.0.3",
+  "private": false,
   "description": "Terrain and Tool Raster Path Finder using WebGPU",
   "type": "module",
   "main": "build/raster-path.js",
@@ -10,8 +11,7 @@
   },
   "files": [
     "build/**/*",
-    "src/**/*.js",
-    "src/**/*.wgsl",
+    "src/**/*",
     "scripts/**/*",
     "README.md",
     "LICENSE"
