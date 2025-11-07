@@ -8,7 +8,32 @@
 </head>
 <body>
     <div id="container">
-        <!-- Controls Panel -->
+        <!-- Left Panel - Model Manipulation -->
+        <div class="model-controls">
+            <div class="section">
+                <h3>Model Rotation</h3>
+                <div class="rotation-controls">
+                    <div class="rotation-row">
+                        <span class="rotation-label">X:</span>
+                        <button class="rotate-btn" data-axis="x" data-dir="-1">-90°</button>
+                        <button class="rotate-btn" data-axis="x" data-dir="1">+90°</button>
+                    </div>
+                    <div class="rotation-row">
+                        <span class="rotation-label">Y:</span>
+                        <button class="rotate-btn" data-axis="y" data-dir="-1">-90°</button>
+                        <button class="rotate-btn" data-axis="y" data-dir="1">+90°</button>
+                    </div>
+                    <div class="rotation-row">
+                        <span class="rotation-label">Z:</span>
+                        <button class="rotate-btn" data-axis="z" data-dir="-1">-90°</button>
+                        <button class="rotate-btn" data-axis="z" data-dir="1">+90°</button>
+                    </div>
+                    <button id="reset-rotation" class="btn btn-small">Reset</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel - Controls -->
         <div class="controls">
             <div class="section">
                 <h3>Mode</h3>

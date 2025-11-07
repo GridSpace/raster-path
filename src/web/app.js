@@ -26,6 +26,9 @@ let toolpathData = null;
 let modelMaxZ = 0;  // Track max Z for tool offset
 let rasterPath = null;  // RasterPath instance
 
+// Model rotation state (accumulated 90-degree rotations)
+let modelRotation = { x: 0, y: 0, z: 0 };  // In 90-degree increments
+
 // Three.js objects
 let scene, camera, renderer, controls;
 let rotatedGroup = null;  // Group for 90-degree rotation
@@ -244,6 +247,141 @@ function parseASCIISTL(arrayBuffer) {
     }
 
     return new Float32Array(triangles);
+}
+
+// ============================================================================
+// Model Rotation
+// ============================================================================
+
+function rotateTriangles90(triangles, axis, direction) {
+    // direction: 1 for +90°, -1 for -90°
+    // Rotates triangle vertices around the specified axis
+    const result = new Float32Array(triangles.length);
+    const angle = direction * Math.PI / 2;  // 90 degrees in radians
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+
+    for (let i = 0; i < triangles.length; i += 3) {
+        const x = triangles[i];
+        const y = triangles[i + 1];
+        const z = triangles[i + 2];
+
+        if (axis === 'x') {
+            // Rotate around X-axis: y' = y*cos - z*sin, z' = y*sin + z*cos
+            result[i] = x;
+            result[i + 1] = y * cos - z * sin;
+            result[i + 2] = y * sin + z * cos;
+        } else if (axis === 'y') {
+            // Rotate around Y-axis: x' = x*cos + z*sin, z' = -x*sin + z*cos
+            result[i] = x * cos + z * sin;
+            result[i + 1] = y;
+            result[i + 2] = -x * sin + z * cos;
+        } else if (axis === 'z') {
+            // Rotate around Z-axis: x' = x*cos - y*sin, y' = x*sin + y*cos
+            result[i] = x * cos - y * sin;
+            result[i + 1] = x * sin + y * cos;
+            result[i + 2] = z;
+        }
+    }
+
+    return result;
+}
+
+function applyModelRotation(axis, direction) {
+    if (!modelMesh) {
+        updateInfo('No model loaded');
+        return;
+    }
+
+    // Update rotation state
+    modelRotation[axis] = (modelRotation[axis] + direction) % 4;
+    if (modelRotation[axis] < 0) modelRotation[axis] += 4;
+
+    // Rotate the mesh using Three.js
+    const angle = direction * Math.PI / 2;
+    if (axis === 'x') {
+        modelMesh.rotateX(angle);
+    } else if (axis === 'y') {
+        modelMesh.rotateY(angle);
+    } else if (axis === 'z') {
+        modelMesh.rotateZ(angle);
+    }
+
+    // Update triangle data by applying the mesh's world matrix
+    modelMesh.updateMatrixWorld(true);
+    const positionAttr = modelMesh.geometry.attributes.position;
+    modelTriangles = new Float32Array(positionAttr.count * 3);
+
+    for (let i = 0; i < positionAttr.count; i++) {
+        const vertex = new THREE.Vector3(
+            positionAttr.getX(i),
+            positionAttr.getY(i),
+            positionAttr.getZ(i)
+        );
+        vertex.applyMatrix4(modelMesh.matrixWorld);
+        modelTriangles[i * 3] = vertex.x;
+        modelTriangles[i * 3 + 1] = vertex.y;
+        modelTriangles[i * 3 + 2] = vertex.z;
+    }
+
+    // Reset mesh matrix and update geometry with rotated vertices
+    modelMesh.rotation.set(0, 0, 0);
+    modelMesh.updateMatrix();
+    modelMesh.updateMatrixWorld(true);
+
+    for (let i = 0; i < positionAttr.count; i++) {
+        positionAttr.setXYZ(i,
+            modelTriangles[i * 3],
+            modelTriangles[i * 3 + 1],
+            modelTriangles[i * 3 + 2]
+        );
+    }
+    positionAttr.needsUpdate = true;
+    modelMesh.geometry.computeVertexNormals();
+    modelMesh.geometry.computeBoundingBox();
+
+    // Clear raster and toolpath data (needs recomputation)
+    modelRasterData = null;
+    toolpathData = null;
+
+    updateButtonStates();
+    updateInfo(`Model rotated ${direction > 0 ? '+' : ''}${direction * 90}° around ${axis.toUpperCase()}`);
+}
+
+function resetModelRotation() {
+    if (!modelMesh || !modelSTL) {
+        updateInfo('No model loaded');
+        return;
+    }
+
+    // Re-parse from original STL
+    modelTriangles = parseSTL(modelSTL);
+    modelRotation = { x: 0, y: 0, z: 0 };
+
+    // Update the existing mesh geometry
+    const positionAttr = modelMesh.geometry.attributes.position;
+    for (let i = 0; i < positionAttr.count; i++) {
+        positionAttr.setXYZ(i,
+            modelTriangles[i * 3],
+            modelTriangles[i * 3 + 1],
+            modelTriangles[i * 3 + 2]
+        );
+    }
+    positionAttr.needsUpdate = true;
+    modelMesh.geometry.computeVertexNormals();
+    modelMesh.geometry.computeBoundingBox();
+
+    // Reset mesh rotation
+    modelMesh.rotation.set(0, 0, 0);
+    modelMesh.updateMatrix();
+    modelMesh.updateMatrixWorld(true);
+
+    // Clear raster and toolpath data
+    modelRasterData = null;
+    toolpathData = null;
+
+    updateButtonStates();
+    updateInfo('Model rotation reset');
 }
 
 // ============================================================================
@@ -610,6 +748,14 @@ function updateVisualization() {
 function displayModelMesh() {
     if (!modelTriangles) return;
 
+    // Remove old mesh if it exists
+    if (modelMesh) {
+        rotatedGroup.remove(modelMesh);
+        modelMesh.geometry.dispose();
+        modelMesh.material.dispose();
+        modelMesh = null;
+    }
+
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(modelTriangles, 3));
     geometry.computeVertexNormals();
@@ -634,6 +780,14 @@ function displayModelMesh() {
 
 function displayToolMesh() {
     if (!toolTriangles) return;
+
+    // Remove old mesh if it exists
+    if (toolMesh) {
+        rotatedGroup.remove(toolMesh);
+        toolMesh.geometry.dispose();
+        toolMesh.material.dispose();
+        toolMesh = null;
+    }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(toolTriangles, 3));
@@ -1196,12 +1350,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateButtonStates();
     });
 
+    // Model rotation buttons
+    document.querySelectorAll('.rotate-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const axis = btn.dataset.axis;
+            const direction = parseInt(btn.dataset.dir);
+            applyModelRotation(axis, direction);
+        });
+    });
+
+    document.getElementById('reset-rotation').addEventListener('click', resetModelRotation);
+
     // Load Model button
     document.getElementById('load-model').addEventListener('click', async () => {
         const result = await loadSTLFile(true);
         if (result) {
             modelSTL = result.arrayBuffer;
             modelTriangles = result.triangles;
+            modelRotation = { x: 0, y: 0, z: 0 };  // Reset rotation on new model
             document.getElementById('model-status').textContent = result.name;
 
             // Clear raster data

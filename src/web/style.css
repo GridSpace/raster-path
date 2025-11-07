@@ -23,6 +23,20 @@ body {
     height: 100%;
 }
 
+.model-controls {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(10px);
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 20px;
+    min-width: 200px;
+    max-width: 240px;
+    z-index: 100;
+}
+
 .controls {
     position: absolute;
     top: 20px;
@@ -155,4 +169,53 @@ input[type="checkbox"] {
 
 .hide {
     display: none;
+}
+
+/* Rotation controls */
+.rotation-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.rotation-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.rotation-label {
+    font-size: 13px;
+    font-weight: 600;
+    min-width: 18px;
+    color: #00ffff;
+}
+
+.rotate-btn {
+    flex: 1;
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: rgba(0, 255, 255, 0.08);
+    border: 1px solid #00ffff;
+    border-radius: 4px;
+    color: #00ffff;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.rotate-btn:hover {
+    background: rgba(0, 255, 255, 0.15);
+    box-shadow: 0 0 6px rgba(0, 255, 255, 0.2);
+}
+
+.rotate-btn:active {
+    background: rgba(0, 255, 255, 0.25);
+    transform: scale(0.98);
+}
+
+.btn-small {
+    padding: 6px 10px;
+    font-size: 11px;
+    margin-top: 4px;
 }

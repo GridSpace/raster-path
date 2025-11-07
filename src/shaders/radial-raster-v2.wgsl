@@ -125,6 +125,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Step 2: Rotate position (scan_x, scan_y, scan_z) around X-axis by 'angle'
         // X stays the same, rotate YZ plane: y' = y*cos - z*sin, z' = y*sin + z*cos
+        // NOTE: This uses right-handed rotation (positive angle rotates +Y towards +Z)
+        // To reverse rotation direction (left-handed or opposite), flip signs:
+        //   y' = y*cos + z*sin  (flip sign on z term)
+        //   z' = -y*sin + z*cos (flip sign on y term)
         let ray_origin_x = scan_x;
         let ray_origin_y = scan_y * cos(angle) - scan_z * sin(angle);
         let ray_origin_z = scan_y * sin(angle) + scan_z * cos(angle);
@@ -132,6 +136,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Step 3: Rotate ray direction (0, 0, -1) around X-axis by 'angle'
         // X component stays 0, rotate YZ: dy = 0*cos - (-1)*sin = sin, dz = 0*sin + (-1)*cos = -cos
+        // NOTE: For reversed rotation, use: vec3<f32>(0.0, -sin(angle), -cos(angle))
         let ray_dir = vec3<f32>(0.0, sin(angle), -cos(angle));
 
         // Initialize best distance (closest hit)
