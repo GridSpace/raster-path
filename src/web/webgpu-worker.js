@@ -1,6 +1,52 @@
-// webgpu-worker.js
-// WebGPU worker for compute-only rasterization and toolpath generation
-// Runs all GPU operations off the main thread to prevent UI blocking
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * WebGPU Worker - GPU Compute Operations
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Offloads all WebGPU compute operations to a worker thread to prevent UI blocking.
+ * Handles both planar (XY grid) and radial (cylindrical) rasterization modes.
+ *
+ * MESSAGE PROTOCOL:
+ * ─────────────────
+ * Main Thread → Worker:
+ *   'init'                     - Initialize WebGPU device
+ *   'rasterize-planar'         - Rasterize geometry to XY grid
+ *   'generate-toolpath-planar' - Generate planar toolpath from rasters
+ *   'radial-generate-toolpaths'- Generate radial toolpaths (does rasterization + toolpath)
+ *
+ * Worker → Main Thread:
+ *   'webgpu-ready'            - Initialization complete
+ *   'rasterize-complete'      - Planar rasterization complete
+ *   'rasterize-progress'      - Progress update (0-1)
+ *   'toolpath-complete'       - Planar toolpath complete
+ *   'toolpath-progress'       - Progress update (0-1)
+ *   'radial-toolpaths-complete' - Radial toolpaths complete
+ *
+ * ARCHITECTURE:
+ * ─────────────
+ * 1. PLANAR MODE:
+ *    - Rasterize terrain: XY grid, keep max Z per cell
+ *    - Rasterize tool: XY grid, keep min Z per cell
+ *    - Generate toolpath: Scan tool over terrain, compute Z-heights
+ *
+ * 2. RADIAL MODE:
+ *    - Batched processing: 360 angles per batch
+ *    - X-bucketing: Spatial partitioning to reduce triangle tests
+ *    - For each angle:
+ *        * Cast ray from origin
+ *        * Rasterize terrain triangles along ray
+ *        * Calculate tool-terrain collision
+ *        * Output Z-heights along X-axis
+ *
+ * MEMORY MANAGEMENT:
+ * ──────────────────
+ * - All GPU buffers are preallocated to known maximum sizes
+ * - Triangle data transferred once per operation
+ * - Output buffers mapped asynchronously to avoid blocking
+ * - Worker maintains pipeline cache to avoid recompilation
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
 
 let device = null;
 let isInitialized = false;
@@ -240,7 +286,9 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     // debug.log(`Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
 
     // Extract options
-    const boundsOverride = options.bounds || options.min ? options : null;  // Support old and new format
+    // boundsOverride: Optional manual bounds to avoid recalculating from triangles
+    // Useful when bounds are already known (e.g., from tiling operations)
+    const boundsOverride = options.bounds || options.min ? options : null;
 
     // Use bounds override if provided, otherwise calculate from triangles
     const bounds = boundsOverride || calculateBounds(triangles);
@@ -2397,7 +2445,8 @@ self.onmessage = async function(e) {
 
                         if (!strip.positions || strip.positions.length === 0) continue;
 
-                        // DEBUG: BUILD_ID_PLACEHOLDER - Check INPUT terrain data
+                        // DEBUG: Diagnostic logging (BUILD_ID gets injected during build)
+                        // Used to trace data flow through radial toolpath pipeline
                         if (globalStripIdx === 0 || globalStripIdx === 360) {
                             debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) INPUT terrain first 5 Z values: ${strip.positions.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
                         }
@@ -2413,7 +2462,7 @@ self.onmessage = async function(e) {
                             pipelineStartTime
                         );
 
-                        // DEBUG: BUILD_ID_PLACEHOLDER - Verify OUTPUT buffer copying
+                        // DEBUG: Verify toolpath generation output
                         if (globalStripIdx === 0 || globalStripIdx === 360) {
                             debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) OUTPUT toolpath first 5 Z values: ${stripToolpathResult.pathData.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
                         }

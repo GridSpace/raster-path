@@ -2,6 +2,47 @@
 // Main ESM entry point
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * RasterPath API Overview
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Unified three-method API for GPU-accelerated toolpath generation.
+ * Works uniformly across both planar (XY grid) and radial (cylindrical) modes.
+ *
+ * USAGE PATTERN:
+ * ──────────────
+ * 1. Create instance: new RasterPath({ mode, resolution, rotationStep? })
+ * 2. Initialize GPU:  await raster.init()
+ * 3. Load tool:       await raster.loadTool({ triangles | sparseData })
+ * 4. Load terrain:    await raster.loadTerrain({ triangles, zFloor?, ... })
+ * 5. Generate paths:  await raster.generateToolpaths({ xStep, yStep, zFloor, ... })
+ * 6. Cleanup:         raster.terminate()
+ *
+ * MODE DIFFERENCES:
+ * ─────────────────
+ * PLANAR MODE:
+ *   - Traditional XY grid rasterization
+ *   - loadTerrain() rasterizes immediately and returns data
+ *   - Best for flat or gently curved surfaces
+ *   - Output: Single 2D array of Z-heights in scanline order
+ *
+ * RADIAL MODE:
+ *   - Cylindrical unwrap rasterization
+ *   - loadTerrain() stores triangles, defers rasterization until generateToolpaths()
+ *   - Best for cylindrical/rotational parts
+ *   - Requires terrain centered in YZ plane (done automatically)
+ *   - Output: Array of radial strips, one per rotation angle
+ *
+ * COORDINATE SYSTEMS:
+ * ───────────────────
+ * - Tool geometry: Z-axis is flipped during loadTool() for collision detection
+ * - Terrain (radial): Auto-centered in YZ plane before storage
+ * - All inputs use standard STL coordinates (right-handed, Z-up)
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+/**
  * Configuration options for RasterPath
  * @typedef {Object} RasterPathConfig
  * @property {'planar'|'radial'} mode - Rasterization mode (default: 'planar')
@@ -157,7 +198,9 @@ export class RasterPath {
         const toolData = await this.#rasterizePlanar({ triangles, isForTool: true });
         const { bounds, positions } = toolData;
 
-        // Flip Z-axis for tool (tool points down)
+        // Transform tool coordinate system: flip Z-axis for collision detection
+        // Tool geometry is inverted so that tool-terrain collision can be computed
+        // as a simple subtraction (terrainZ - toolZ) instead of complex geometry tests
         for (let i=0; i<positions.length; i += 3) {
             positions[i+2] = -positions[i+2] - bounds.min.z;
         }
@@ -195,6 +238,8 @@ export class RasterPath {
             const originalBounds = boundsOverride || this.#calculateBounds(triangles);
 
             // Center model in YZ plane (required for radial rasterization)
+            // Radial mode casts rays from origin, so terrain must be centered at (0,0) in YZ
+            // to ensure rays intersect the geometry symmetrically around the rotation axis
             const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
             const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
 
@@ -225,12 +270,13 @@ export class RasterPath {
      * Generate toolpaths from loaded terrain and tool
      * Must call loadTool() and loadTerrain() first
      * @param {object} params - Parameters
-     * @param {number} params.xStep - X-axis step size in grid points
-     * @param {number} params.yStep - Y-axis step size in grid points
-     * @param {number} params.zFloor - Z floor value for out-of-bounds
-     * @param {number} params.radiusOffset - Radial only: tool offset above terrain (mm), default 20
-     * @param {function} params.onProgress - Optional progress callback (percent, info) => {}
-     * @returns {Promise<object>} Toolpath data (format depends on mode)
+     * @param {number} params.xStep - Sample every Nth point in X direction
+     * @param {number} params.yStep - Sample every Nth point in Y direction
+     * @param {number} params.zFloor - Z floor value for out-of-bounds areas
+     * @param {number} params.radiusOffset - (Radial mode only) Distance from terrain surface to tool tip in mm.
+     *                                        Used to calculate radial collision offset. Default: 20mm
+     * @param {function} params.onProgress - Optional progress callback (progress: number, info?: string) => void
+     * @returns {Promise<object>} Planar: {pathData, width, height} | Radial: {strips[], numStrips, totalPoints}
      */
     async generateToolpaths({ xStep, yStep, zFloor, radiusOffset = 20, onProgress }) {
         if (!this.isInitialized) {
@@ -352,15 +398,17 @@ export class RasterPath {
     async #generateToolpathsRadial({ triangles, bounds, toolData, xStep, yStep, zFloor, onProgress }) {
         const maxRadius = this.#calculateMaxRadius(triangles);
 
-        // Calculate tool width for radial strips
+        // Calculate maximum tool extent in YZ plane (perpendicular to rotation axis)
+        // This determines the radial collision search radius for each ray cast
         const toolWidth = Math.max(
             Math.abs(toolData.bounds.max.y - toolData.bounds.min.y),
             Math.abs(toolData.bounds.max.x - toolData.bounds.min.x)
         );
 
-        // Build X-bucketing data - full 360° rotation
+        // Build X-bucketing data for spatial partitioning along rotation axis
+        // Divides terrain into buckets along X-axis to reduce triangle intersection tests
         const numAngles = Math.ceil(360 / this.rotationStep);
-        const bucketWidth = 1.0; // mm - smaller buckets = better load balancing
+        const bucketWidth = 1.0; // Bucket size in mm - smaller = better load balancing, more memory
         const bucketData = this.#bucketTrianglesByX(triangles, bounds, bucketWidth);
 
         return new Promise((resolve, reject) => {
@@ -473,6 +521,16 @@ export class RasterPath {
         return maxRadius;
     }
 
+    /**
+     * Partition triangles into spatial buckets along X-axis for radial rasterization
+     * This optimization reduces triangle intersection tests by only checking triangles
+     * within relevant X-ranges during ray casting
+     *
+     * @returns {object} Bucket data structure with:
+     *   - buckets: Array of {minX, maxX, startIndex, count}
+     *   - triangleIndices: Uint32Array of triangle indices sorted by bucket
+     *   - numBuckets: Total number of buckets
+     */
     #bucketTrianglesByX(triangles, bounds, bucketWidth) {
         const numTriangles = triangles.length / 9;
         const numBuckets = Math.ceil((bounds.max.x - bounds.min.x) / bucketWidth);
