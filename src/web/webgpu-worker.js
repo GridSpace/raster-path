@@ -163,8 +163,8 @@ const rasterizeShaderCode = /*SHADER:planar-rasterize*/;
 // Planar toolpath generation
 const toolpathShaderCode = /*SHADER:planar-toolpath*/;
 
-// Radial V2: Rasterization with rotating ray planes and X-bucketing
-const radialRasterizeV2ShaderCode = /*SHADER:radial-raster-v2*/;
+// Radial: Rasterization with rotating ray planes and X-bucketing
+const radialRasterizeShaderCode = /*SHADER:radial-raster*/;
 
 // Calculate bounding box from triangle vertices
 function calculateBounds(triangles) {
@@ -1651,7 +1651,7 @@ const MAX_WORKLOAD_PER_TILE = 10_000_000; // triangles × gridHeight budget per 
 let cachedRadialCullPipeline = null;
 let cachedRadialRasterizePipeline = null;
 
-async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor = 0, boundsOverride = null, params = {}) {
+async function radialRasterizeTiled(triangles, stepSize, rotationStepDegrees, zFloor = 0, boundsOverride = null, params = {}) {
     const startTime = performance.now();
 
     if (!isInitialized) {
@@ -2048,8 +2048,21 @@ async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor 
     };
 }
 
-// Radial V2: Rasterize model with rotating ray planes and X-bucketing
-async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds, startAngle = 0, reusableBuffers = null, returnBuffersForReuse = false) {
+// Radial: Rasterize model with rotating ray planes and X-bucketing
+async function radialRasterize({
+    triangles,
+    bucketData,
+    resolution,
+    angleStep,
+    numAngles,
+    maxRadius,
+    toolWidth,
+    zFloor,
+    bounds,
+    startAngle = 0,
+    reusableBuffers = null,
+    returnBuffersForReuse = false
+}) {
     if (!device) {
         throw new Error('WebGPU not initialized');
     }
@@ -2076,7 +2089,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const avgTriangles = bucketTriangleCounts.reduce((a, b) => a + b, 0) / bucketTriangleCounts.length;
     const workPerWorkgroup = maxTriangles * numAngles * bucketGridWidth * gridYHeight;
 
-    debug.log(`[Worker] Radial V2: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
+    debug.log(`[Worker] Radial: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
     debug.log(`[Worker] Load: min=${minTriangles} max=${maxTriangles} avg=${avgTriangles.toFixed(0)} (${(maxTriangles/avgTriangles).toFixed(2)}x imbalance, worst=${(workPerWorkgroup/1e6).toFixed(1)}M tests)`);
 
     // Reuse buffers if provided, otherwise create new ones
@@ -2177,7 +2190,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     uniformBuffer.unmap();
 
     // Create shader and pipeline
-    const shaderModule = device.createShaderModule({ code: radialRasterizeV2ShaderCode });
+    const shaderModule = device.createShaderModule({ code: radialRasterizeShaderCode });
     const pipeline = device.createComputePipeline({
         layout: 'auto',
         compute: {
@@ -2295,7 +2308,7 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     timings.stitch = performance.now() - stitchStart;
     const totalTime = performance.now() - timings.start;
 
-    debug.log(`[Worker] Radial V2 complete: ${totalTime.toFixed(0)}ms`);
+    debug.log(`[Worker] Radial complete: ${totalTime.toFixed(0)}ms`);
     debug.log(`[Worker]   Prep: ${timings.prep.toFixed(0)}ms (${(timings.prep/totalTime*100).toFixed(0)}%)`);
     debug.log(`[Worker]   GPU:  ${timings.gpu.toFixed(0)}ms (${(timings.gpu/totalTime*100).toFixed(0)}%)`);
     debug.log(`[Worker]   Stitch: ${timings.stitch.toFixed(0)}ms (${(timings.stitch/totalTime*100).toFixed(0)}%)`);
@@ -2462,20 +2475,20 @@ self.onmessage = async function(e) {
 
                     // Rasterize this batch of strips
                     const shouldReturnBuffers = (batchIdx === 0 && numBatches > 1);  // First batch of multi-batch operation
-                    const batchModelResult = await radialRasterizeV2(
-                        radialModelTriangles,
-                        radialBucketData,
-                        radialResolution,
-                        radialAngleStep,
-                        batchNumAngles,
-                        radialMaxRadius,
-                        radialToolWidth,
-                        radialToolpathZFloor,
-                        radialToolpathBounds,
-                        batchStartAngle,      // Start angle for this batch
-                        batchReuseBuffers,    // Pass reusable buffers (null on first batch)
-                        shouldReturnBuffers   // Return buffers for reuse if first batch of multi-batch
-                    );
+                    const batchModelResult = await radialRasterize({
+                        triangles: radialModelTriangles,
+                        bucketData: radialBucketData,
+                        resolution: radialResolution,
+                        angleStep: radialAngleStep,
+                        numAngles: batchNumAngles,
+                        maxRadius: radialMaxRadius,
+                        toolWidth: radialToolWidth,
+                        zFloor: radialToolpathZFloor,
+                        bounds: radialToolpathBounds,
+                        startAngle: batchStartAngle,
+                        reusableBuffers: batchReuseBuffers,
+                        returnBuffersForReuse: shouldReturnBuffers
+                    });
 
                     // Capture buffers from first batch for reuse
                     if (batchIdx === 0 && batchModelResult.reusableBuffers) {
