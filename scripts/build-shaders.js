@@ -21,7 +21,7 @@ const WORKER_DEST = path.join(BUILD_DIR, 'webgpu-worker.js');
 let workerCode = fs.readFileSync(WORKER_SRC, 'utf8');
 
 // Find all shader placeholders
-const shaderRegex = /\/\*SHADER:([a-z-]+)\*\//g;
+const shaderRegex = /\/\*SHADER:([a-z0-9-]+)\*\//g;
 let match;
 const replacements = [];
 
@@ -54,6 +54,11 @@ for (const { shaderName, placeholder } of replacements) {
 if (!fs.existsSync(BUILD_DIR)) {
     fs.mkdirSync(BUILD_DIR, { recursive: true });
 }
+
+// Inject unique build ID
+const buildId = Math.random().toString(36).substring(2, 10).toUpperCase();
+workerCode = workerCode.replace(/BUILD_ID_PLACEHOLDER/g, buildId);
+console.log(`🔨 Build ID: ${buildId}`);
 
 // Write output
 fs.writeFileSync(WORKER_DEST, workerCode, 'utf8');

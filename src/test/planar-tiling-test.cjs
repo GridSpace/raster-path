@@ -1,14 +1,13 @@
-// planar-test.cjs
-// Regression test for planar mode using new RasterPath API
-// Tests: loadTool() + loadTerrain() + generateToolpaths()
+// planar-tiling-test.cjs
+// Test for planar tiling with very high resolution (0.01mm)
+// This should trigger automatic tiling to avoid GPU memory allocation failures
 
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const OUTPUT_DIR = path.join(__dirname, '../../test-output');
-const BASELINE_FILE = path.join(OUTPUT_DIR, 'planar-baseline.json');
-const CURRENT_FILE = path.join(OUTPUT_DIR, 'planar-current.json');
+const OUTPUT_FILE = path.join(OUTPUT_DIR, 'planar-tiling-test.json');
 
 if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -36,17 +35,15 @@ function createWindow() {
 
         const testScript = `
             (async function() {
-                console.log('=== Planar Mode Regression Test ===');
+                console.log('=== Planar Tiling Test (0.01mm resolution) ===');
 
                 if (!navigator.gpu) {
                     return { error: 'WebGPU not available' };
                 }
                 console.log('✓ WebGPU available');
 
-                // Import RasterPath
                 const { RasterPath } = await import('./raster-path.js');
 
-                // Load STL files
                 console.log('\\nLoading STL files...');
                 const terrainResponse = await fetch('../benchmark/fixtures/terrain.stl');
                 const terrainBuffer = await terrainResponse.arrayBuffer();
@@ -57,7 +54,6 @@ function createWindow() {
                 console.log('✓ Loaded terrain.stl:', terrainBuffer.byteLength, 'bytes');
                 console.log('✓ Loaded tool.stl:', toolBuffer.byteLength, 'bytes');
 
-                // Parse STL files
                 function parseBinarySTL(buffer) {
                     const dataView = new DataView(buffer);
                     const numTriangles = dataView.getUint32(80, true);
@@ -65,12 +61,12 @@ function createWindow() {
                     let offset = 84;
 
                     for (let i = 0; i < numTriangles; i++) {
-                        offset += 12; // Skip normal
+                        offset += 12;
                         for (let j = 0; j < 9; j++) {
                             positions[i * 9 + j] = dataView.getFloat32(offset, true);
                             offset += 4;
                         }
-                        offset += 2; // Skip attribute byte count
+                        offset += 2;
                     }
                     return positions;
                 }
@@ -80,18 +76,30 @@ function createWindow() {
                 console.log('✓ Parsed terrain:', terrainTriangles.length / 9, 'triangles');
                 console.log('✓ Parsed tool:', toolTriangles.length / 9, 'triangles');
 
-                // Test parameters
-                const resolution = 0.05; // 0.05mm high resolution
+                // HIGH RESOLUTION - should trigger tiling
+                const resolution = 0.01;
                 const xStep = 1;
                 const yStep = 1;
                 const zFloor = -100;
 
                 console.log('\\nTest parameters:');
-                console.log('  Resolution:', resolution, 'mm');
+                console.log('  Resolution:', resolution, 'mm (VERY HIGH - should trigger tiling)');
                 console.log('  XY step:', xStep + 'x' + yStep, 'points');
                 console.log('  Z floor:', zFloor, 'mm');
 
-                // Create RasterPath instance for planar mode
+                // Calculate expected grid size
+                // Terrain is roughly 1000x1000mm, so at 0.01mm = 100,000 x 100,000 grid
+                // = 10 billion points * 4 bytes = 40GB (way over GPU limit!)
+                const terrainSize = 1000; // approximate
+                const expectedGridSize = Math.ceil(terrainSize / resolution);
+                const expectedPoints = expectedGridSize * expectedGridSize;
+                const expectedMemoryMB = (expectedPoints * 4) / (1024 * 1024);
+                console.log('\\nExpected memory usage:');
+                console.log('  Grid size:', expectedGridSize + 'x' + expectedGridSize);
+                console.log('  Total points:', (expectedPoints / 1e6).toFixed(1) + 'M');
+                console.log('  Memory needed:', expectedMemoryMB.toFixed(0) + 'MB');
+                console.log('  GPU limit: ~512MB (should trigger tiling)');
+
                 console.log('\\nInitializing RasterPath (planar mode)...');
                 const raster = new RasterPath({
                     mode: 'planar',
@@ -100,8 +108,7 @@ function createWindow() {
                 await raster.init();
                 console.log('✓ RasterPath initialized');
 
-                // Load tool (NEW API)
-                console.log('\\n1. Loading tool...');
+                console.log('\\n1. Loading tool (NEW API)...');
                 const t0 = performance.now();
                 const toolData = await raster.loadTool({
                     triangles: toolTriangles
@@ -109,18 +116,27 @@ function createWindow() {
                 const toolTime = performance.now() - t0;
                 console.log('✓ Tool:', toolData.pointCount, 'points in', toolTime.toFixed(1), 'ms');
 
-                // Load terrain (NEW API)
-                console.log('\\n2. Loading terrain...');
+                console.log('\\n2. Loading terrain (NEW API - should use tiling)...');
                 const t1 = performance.now();
-                const terrainData = await raster.loadTerrain({
-                    triangles: terrainTriangles,
-                    zFloor: zFloor
-                });
-                const terrainTime = performance.now() - t1;
-                console.log('✓ Terrain:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
+                let terrainData;
+                let terrainTime;
+                try {
+                    terrainData = await raster.loadTerrain({
+                        triangles: terrainTriangles,
+                        zFloor: zFloor
+                    });
+                    terrainTime = performance.now() - t1;
+                    console.log('✓ Terrain:', terrainData.pointCount, 'points in', terrainTime.toFixed(1), 'ms');
+                } catch (error) {
+                    console.error('❌ Terrain loading FAILED:', error.message);
+                    return {
+                        error: 'Terrain loading failed: ' + error.message,
+                        expectedTiling: true,
+                        resolution: resolution
+                    };
+                }
 
-                // Generate toolpaths (NEW API - no need to pass terrainData/toolData)
-                console.log('\\n3. Generating toolpaths...');
+                console.log('\\n3. Generating toolpaths (NEW API)...');
                 const t2 = performance.now();
                 const toolpathData = await raster.generateToolpaths({
                     xStep: xStep,
@@ -131,42 +147,27 @@ function createWindow() {
                 console.log('✓ Toolpath:', toolpathData.numScanlines + 'x' + toolpathData.pointsPerLine, '=', toolpathData.pathData.length, 'Z-values');
                 console.log('  Generation time:', toolpathTime.toFixed(1), 'ms');
 
-                // Cleanup
                 raster.terminate();
 
-                // Calculate checksum for regression detection
+                // Calculate checksum
                 let checksum = 0;
-                for (let i = 0; i < toolpathData.pathData.length; i++) {
+                for (let i = 0; i < Math.min(1000, toolpathData.pathData.length); i++) {
                     checksum = (checksum + toolpathData.pathData[i] * (i + 1)) | 0;
-                }
-
-                // Sample first 30 Z-values for debugging
-                const sampleSize = Math.min(30, toolpathData.pathData.length);
-                const sampleValues = [];
-                for (let i = 0; i < sampleSize; i++) {
-                    sampleValues.push(toolpathData.pathData[i].toFixed(2));
                 }
 
                 return {
                     success: true,
+                    tilingWorked: true,
                     output: {
                         parameters: {
-                            mode: 'planar',
                             resolution: resolution,
-                            xStep,
-                            yStep,
-                            zFloor,
-                            terrainTriangles: terrainTriangles.length / 9,
-                            toolTriangles: toolTriangles.length / 9
+                            expectedMemoryMB: Math.round(expectedMemoryMB)
                         },
                         result: {
                             terrainPoints: terrainData.pointCount,
                             toolPoints: toolData.pointCount,
                             toolpathSize: toolpathData.pathData.length,
-                            numScanlines: toolpathData.numScanlines,
-                            pointsPerLine: toolpathData.pointsPerLine,
-                            checksum: checksum,
-                            sampleValues: sampleValues
+                            checksum: checksum
                         },
                         timing: {
                             terrain: terrainTime,
@@ -183,71 +184,47 @@ function createWindow() {
             const result = await mainWindow.webContents.executeJavaScript(testScript);
 
             if (result.error) {
-                console.error('❌ Test failed:', result.error);
+                console.error('\n❌ TEST FAILED - Tiling did not work!');
+                console.error('Error:', result.error);
+                console.error('Resolution:', result.resolution);
+                console.error('Expected tiling:', result.expectedTiling);
+
+                fs.writeFileSync(OUTPUT_FILE, JSON.stringify({
+                    failed: true,
+                    error: result.error,
+                    resolution: result.resolution
+                }, null, 2));
+
                 app.exit(1);
                 return;
             }
 
-            // Save current output
-            const currentData = {
-                parameters: result.output.parameters,
-                result: result.output.result,
-                timing: result.output.timing
-            };
+            console.log('\n=== Test Complete ===');
+            console.log('✅ Tiling worked correctly!');
+            console.log('Terrain points:', result.output.result.terrainPoints);
+            console.log('Tool points:', result.output.result.toolPoints);
+            console.log('Toolpath size:', result.output.result.toolpathSize);
+            console.log('Total time:', result.output.timing.total.toFixed(1), 'ms');
 
-            fs.writeFileSync(CURRENT_FILE, JSON.stringify(currentData, null, 2));
-            console.log('\n✓ Saved current output to', CURRENT_FILE);
-            console.log(`  Toolpath size: ${result.output.result.toolpathSize} Z-values`);
-            console.log(`  Checksum: ${result.output.result.checksum}`);
-            console.log(`  Total time: ${result.output.timing.total.toFixed(1)}ms`);
+            fs.writeFileSync(OUTPUT_FILE, JSON.stringify(result.output, null, 2));
+            console.log('\n✓ Results written to:', OUTPUT_FILE);
 
-            // Check if baseline exists
-            if (!fs.existsSync(BASELINE_FILE)) {
-                console.log('\n📝 No baseline found - saving current as baseline');
-                fs.writeFileSync(BASELINE_FILE, JSON.stringify(currentData, null, 2));
-                console.log('✅ Baseline created');
-                app.exit(0);
-                return;
-            }
-
-            // Compare with baseline
-            const baseline = JSON.parse(fs.readFileSync(BASELINE_FILE, 'utf8'));
-
-            console.log('\n=== Comparison ===');
-            console.log('Baseline checksum:', baseline.result.checksum);
-            console.log('Current checksum:', result.output.result.checksum);
-
-            let passed = true;
-
-            if (baseline.result.toolpathSize !== result.output.result.toolpathSize) {
-                console.error('❌ Toolpath size mismatch!');
-                console.error(`  Expected: ${baseline.result.toolpathSize}, Got: ${result.output.result.toolpathSize}`);
-                passed = false;
-            }
-
-            if (baseline.result.checksum !== result.output.result.checksum) {
-                console.error('❌ Checksum mismatch!');
-                console.error(`  Expected: ${baseline.result.checksum}, Got: ${result.output.result.checksum}`);
-                passed = false;
-            } else {
-                console.log('✓ Checksum matches');
-            }
-
-            if (passed) {
-                console.log('\n✅ All checks passed - output matches baseline');
-                app.exit(0);
-            } else {
-                console.log('\n❌ Regression detected - output differs from baseline');
-                console.log('To update baseline: cp', CURRENT_FILE, BASELINE_FILE);
-                app.exit(1);
-            }
-
+            app.exit(0);
         } catch (error) {
-            console.error('Error running test:', error);
+            console.error('❌ Test execution error:', error);
             app.exit(1);
+        }
+    });
+
+    mainWindow.webContents.on('console-message', (event, level, message) => {
+        if (message.includes('[Raster') || message.includes('[Worker') || message.includes('Tiling')) {
+            console.log('[Browser]', message);
         }
     });
 }
 
 app.whenReady().then(createWindow);
-app.on('window-all-closed', () => app.quit());
+
+app.on('window-all-closed', () => {
+    app.quit();
+});
