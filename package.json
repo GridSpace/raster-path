@@ -26,6 +26,7 @@
   },
   "scripts": {
     "prepare": "npm run build",
+    "postinstall": "npm run build",
     "build": "npm run clean && npm run build:web && npm run build:shaders",
     "build:shaders": "node scripts/build-shaders.js",
     "build:web": "mkdir -p build && cp src/web/*.html src/web/*.css src/web/*.js build/ && cp src/index.js build/raster-path.js && cp src/etc/serve.json build/",
