@@ -238,8 +238,8 @@ export class RasterPath {
             const originalBounds = boundsOverride || this.#calculateBounds(triangles);
 
             // Center model in YZ plane (required for radial rasterization)
-            // Radial mode casts rays from origin, so terrain must be centered at (0,0) in YZ
-            // to ensure rays intersect the geometry symmetrically around the rotation axis
+            // Radial mode casts rays from max_radius distance inward toward the X-axis,
+            // and centering ensures the geometry is symmetric around the rotation axis
             const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
             const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
 
@@ -273,12 +273,10 @@ export class RasterPath {
      * @param {number} params.xStep - Sample every Nth point in X direction
      * @param {number} params.yStep - Sample every Nth point in Y direction
      * @param {number} params.zFloor - Z floor value for out-of-bounds areas
-     * @param {number} params.radiusOffset - (Radial mode only) Distance from terrain surface to tool tip in mm.
-     *                                        Used to calculate radial collision offset. Default: 20mm
      * @param {function} params.onProgress - Optional progress callback (progress: number, info?: string) => void
      * @returns {Promise<object>} Planar: {pathData, width, height} | Radial: {strips[], numStrips, totalPoints}
      */
-    async generateToolpaths({ xStep, yStep, zFloor, radiusOffset = 20, onProgress }) {
+    async generateToolpaths({ xStep, yStep, zFloor, onProgress }) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }

@@ -68,12 +68,11 @@ await raster.loadTerrain({
     zFloor: 0
 });
 
-// Generate toolpaths with radius offset
+// Generate toolpaths
 const toolpathData = await raster.generateToolpaths({
     xStep: 5,
     yStep: 5,
-    zFloor: 0,
-    radiusOffset: 20  // Tool offset above surface (radial mode only)
+    zFloor: 0
 });
 
 // Output is array of strips (one per rotation angle)
@@ -222,14 +221,13 @@ await raster.loadTerrain({
 
 ---
 
-#### `async generateToolpaths({ xStep, yStep, zFloor, radiusOffset, onProgress })`
+#### `async generateToolpaths({ xStep, yStep, zFloor, onProgress })`
 Generate toolpaths from loaded tool and terrain. Must call `loadTool()` and `loadTerrain()` first.
 
 **Parameters**:
 - `xStep` (number): Sample every Nth point in X direction
 - `yStep` (number): Sample every Nth point in Y direction
 - `zFloor` (number): Z floor value for out-of-bounds areas
-- `radiusOffset` (number, radial only): Tool offset above surface (mm)
 - `onProgress` (function, optional): Progress callback `(progress: number) => void`
 
 **Returns**:
