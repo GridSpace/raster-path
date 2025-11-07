@@ -13,7 +13,8 @@ let xStep = 5;
 let yStep = 5;
 let angleStep = 1.0; // degrees
 
-let modelSTL = null;  // ArrayBuffer
+let modelSTL = null;  // ArrayBuffer (current, possibly rotated)
+let modelOriginalSTL = null;  // ArrayBuffer (original, for reset)
 let toolSTL = null;   // ArrayBuffer
 
 let modelTriangles = null;  // Float32Array
@@ -250,6 +251,48 @@ function parseASCIISTL(arrayBuffer) {
 }
 
 // ============================================================================
+// STL Creation from Triangles
+// ============================================================================
+
+function createSTLFromTriangles(triangles) {
+    // Create binary STL from triangle array
+    const numTriangles = triangles.length / 9;
+    const bufferSize = 80 + 4 + numTriangles * 50; // header + count + triangles
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+
+    // Write header (80 bytes, can be anything)
+    const headerText = 'Binary STL - rotated model';
+    for (let i = 0; i < Math.min(headerText.length, 80); i++) {
+        view.setUint8(i, headerText.charCodeAt(i));
+    }
+
+    // Write triangle count
+    view.setUint32(80, numTriangles, true);
+
+    // Write triangles
+    let offset = 84;
+    for (let i = 0; i < triangles.length; i += 9) {
+        // Calculate normal (simplified - not computing actual normal)
+        view.setFloat32(offset, 0, true); offset += 4; // nx
+        view.setFloat32(offset, 0, true); offset += 4; // ny
+        view.setFloat32(offset, 1, true); offset += 4; // nz
+
+        // Write vertices
+        for (let j = 0; j < 9; j++) {
+            view.setFloat32(offset, triangles[i + j], true);
+            offset += 4;
+        }
+
+        // Attribute byte count
+        view.setUint16(offset, 0, true);
+        offset += 2;
+    }
+
+    return buffer;
+}
+
+// ============================================================================
 // Model Rotation
 // ============================================================================
 
@@ -344,18 +387,24 @@ function applyModelRotation(axis, direction) {
     modelRasterData = null;
     toolpathData = null;
 
+    // Update cached STL with rotated triangles
+    modelSTL = createSTLFromTriangles(modelTriangles);
+    cacheSTL('model-stl', modelSTL, document.getElementById('model-status').textContent || 'model.stl')
+        .catch(err => console.warn('Failed to cache rotated model:', err));
+
     updateButtonStates();
     updateInfo(`Model rotated ${direction > 0 ? '+' : ''}${direction * 90}° around ${axis.toUpperCase()}`);
 }
 
 function resetModelRotation() {
-    if (!modelMesh || !modelSTL) {
+    if (!modelMesh || !modelOriginalSTL) {
         updateInfo('No model loaded');
         return;
     }
 
-    // Re-parse from original STL
-    modelTriangles = parseSTL(modelSTL);
+    // Re-parse from ORIGINAL STL (not current/rotated)
+    modelTriangles = parseSTL(modelOriginalSTL);
+    modelSTL = modelOriginalSTL; // Reset current to original
     modelRotation = { x: 0, y: 0, z: 0 };
 
     // Update the existing mesh geometry
@@ -379,6 +428,10 @@ function resetModelRotation() {
     // Clear raster and toolpath data
     modelRasterData = null;
     toolpathData = null;
+
+    // Update cache with original STL
+    cacheSTL('model-stl', modelSTL, document.getElementById('model-status').textContent || 'model.stl')
+        .catch(err => console.warn('Failed to cache reset model:', err));
 
     updateButtonStates();
     updateInfo('Model rotation reset');
@@ -1258,6 +1311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Handle both old format (raw ArrayBuffer) and new format (object with arrayBuffer and name)
         const isOldFormat = cachedModel instanceof ArrayBuffer;
         modelSTL = isOldFormat ? cachedModel : cachedModel.arrayBuffer;
+        modelOriginalSTL = modelSTL; // Cache might have rotated model, but treat as original for now
         modelTriangles = parseSTL(modelSTL);
         document.getElementById('model-status').textContent = isOldFormat ? 'Cached model' : (cachedModel.name || 'Cached model');
         displayModelMesh();
@@ -1366,6 +1420,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const result = await loadSTLFile(true);
         if (result) {
             modelSTL = result.arrayBuffer;
+            modelOriginalSTL = result.arrayBuffer; // Save original for reset
             modelTriangles = result.triangles;
             modelRotation = { x: 0, y: 0, z: 0 };  // Reset rotation on new model
             document.getElementById('model-status').textContent = result.name;

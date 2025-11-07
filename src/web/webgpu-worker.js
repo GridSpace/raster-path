@@ -2377,10 +2377,28 @@ self.onmessage = async function(e) {
                 debug.log('[Worker] Starting complete radial toolpath pipeline...');
 
                 // Batch processing: rasterize angle ranges to avoid memory allocation failure
-                const ANGLES_PER_BATCH = 360;  // Process 360 angles at a time
+                // Calculate safe batch size based on available GPU memory
+                const MAX_BUFFER_SIZE_MB = 1800; // Stay under 2GB WebGPU limit with headroom
+                const bytesPerCell = 4; // f32
+
+                const xSize = radialToolpathBounds.max.x - radialToolpathBounds.min.x;
+                const ySize = radialToolpathBounds.max.y - radialToolpathBounds.min.y;
+                const gridXSize = Math.ceil(xSize / radialResolution);
+                const gridYHeight = Math.ceil(ySize / radialResolution);
+
+                // Calculate cells per angle
+                const cellsPerAngle = gridXSize * gridYHeight;
+                const bytesPerAngle = cellsPerAngle * bytesPerCell;
+                const maxAnglesPerBatch = Math.floor((MAX_BUFFER_SIZE_MB * 1024 * 1024) / bytesPerAngle);
+
+                // Use at least 10 angles per batch, at most all angles
+                const ANGLES_PER_BATCH = Math.max(10, Math.min(maxAnglesPerBatch, radialNumAngles));
                 const numBatches = Math.ceil(radialNumAngles / ANGLES_PER_BATCH);
 
-                debug.log(`[Worker] Processing ${radialNumAngles} angles in ${numBatches} batch(es) of up to ${ANGLES_PER_BATCH} angles`);
+                const batchSizeMB = (ANGLES_PER_BATCH * bytesPerAngle / 1024 / 1024).toFixed(1);
+                debug.log(`[Worker] Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
+                debug.log(`[Worker] Batch size: ${ANGLES_PER_BATCH} angles (~${batchSizeMB}MB per batch)`);
+                debug.log(`[Worker] Processing ${radialNumAngles} angles in ${numBatches} batch(es)`);
 
                 const allStripToolpaths = [];
                 let totalToolpathPoints = 0;
