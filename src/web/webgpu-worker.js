@@ -48,7 +48,9 @@
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
+let config = null;
 let device = null;
+let deviceCapabilities = null;
 let isInitialized = false;
 let cachedRasterizePipeline = null;
 let cachedRasterizeShaderModule = null;
@@ -56,22 +58,28 @@ let cachedToolpathPipeline = null;
 let cachedToolpathShaderModule = null;
 let cachedRadialBatchPipeline = null;
 let cachedRadialBatchShaderModule = null;
-let config = null;
-let deviceCapabilities = null;
 
 const EMPTY_CELL = -1e10;
-const log_pre = '[Raster Worker]';
+const log_pre = '[Worker]';
 const diagnostic = false;
 
 // url params to control logging
 let { search } = self.location;
 let verbose = search.indexOf('debug') >= 0;
 let quiet = search.indexOf('quiet') >= 0;
+let lastlog;
 
 const debug = {
     error: function() { console.error(log_pre, ...arguments) },
     warn: function() { console.warn(log_pre, ...arguments) },
-    log: function() { !quiet && console.log(log_pre, ...arguments) },
+    log: function() {
+        if (!quiet) {
+            let now = performance.now();
+            let since = ((now - (lastlog ?? now)) | 0).toString().padStart(4,' ');
+            console.log(log_pre, `[${since}]`, ...arguments);
+            lastlog = now;
+        }
+    },
     ok: function() { console.log(log_pre, '✅', ...arguments) },
 };
 
@@ -1656,13 +1664,6 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
     };
 }
 
-// Radial rasterization - two-pass tiled with bit-attention
-// Workload budget: triangles × scanlines should stay under this to avoid timeouts
-const MAX_WORKLOAD_PER_TILE = 10_000_000; // triangles × gridHeight budget per tile
-
-let cachedRadialCullPipeline = null;
-let cachedRadialRasterizePipeline = null;
-
 // Radial: Rasterize model with rotating ray planes and X-bucketing
 async function radialRasterize({
     triangles,
@@ -2119,7 +2120,7 @@ self.onmessage = async function(e) {
                     const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
 
                     // Generate toolpaths for this batch
-                    if (diagnostic)
+                    // if (diagnostic)
                     debug.log(`Batch ${batchIdx + 1}: Generating toolpaths for ${batchModelResult.strips.length} strips...`);
                     for (let i = 0; i < batchModelResult.strips.length; i++) {
                         const strip = batchModelResult.strips[i];
@@ -2174,7 +2175,7 @@ self.onmessage = async function(e) {
 
                     destroyReusableToolpathBuffers(reusableBuffers);
 
-                    if (diagnostic)
+                    // if (diagnostic)
                     debug.log(`Batch ${batchIdx + 1}: Completed, allStripToolpaths now has ${allStripToolpaths.length} strips total`);
 
                     // Free batch terrain data
