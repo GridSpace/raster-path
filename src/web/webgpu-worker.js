@@ -54,6 +54,8 @@ let cachedRasterizePipeline = null;
 let cachedRasterizeShaderModule = null;
 let cachedToolpathPipeline = null;
 let cachedToolpathShaderModule = null;
+let cachedRadialBatchPipeline = null;
+let cachedRadialBatchShaderModule = null;
 let config = null;
 let deviceCapabilities = null;
 
@@ -140,6 +142,15 @@ async function initWebGPU() {
             compute: { module: cachedToolpathShaderModule, entryPoint: 'main' },
         });
 
+        // Pre-compile radial batch shader module
+        cachedRadialBatchShaderModule = device.createShaderModule({ code: radialRasterizeShaderCode });
+
+        // Pre-create radial batch pipeline
+        cachedRadialBatchPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedRadialBatchShaderModule, entryPoint: 'main' },
+        });
+
         // Store device capabilities
         deviceCapabilities = {
             maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
@@ -195,8 +206,6 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     const gridWidth = Math.max(1, Math.ceil((bounds.max.x - bounds.min.x) / cellSize));
     const gridHeight = Math.max(1, Math.ceil((bounds.max.y - bounds.min.y) / cellSize));
     const totalCells = gridWidth * gridHeight;
-
-    // debug.log(`Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
 
     const grid = new Array(totalCells);
     for (let i = 0; i < totalCells; i++) {
@@ -254,7 +263,8 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     cellOffsets[totalCells] = currentOffset;
 
     const avgPerCell = totalTriangleRefs / totalCells;
-    // debug.log(`Spatial grid: ${totalTriangleRefs} refs (avg ${avgPerCell.toFixed(1)} per cell)`);
+
+    debug.log(`Spatial grid: ${gridWidth}x${gridHeight} ${totalTriangleRefs}refs ~${avgPerCell.toFixed(1)}/${cellSize}mm`);
 
     return {
         gridWidth,
@@ -283,7 +293,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         debug.log(`First-time init: ${(initEnd - initStart).toFixed(1)}ms`);
     }
 
-    // debug.log(`Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
+    // debug.log(`Raster ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
 
     // Extract options
     // boundsOverride: Optional manual bounds to avoid recalculating from triangles
@@ -314,14 +324,16 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     const floatsPerPoint = filterMode === 0 ? 1 : 3;
     const outputSize = totalGridPoints * floatsPerPoint * 4;
     const maxBufferSize = device.limits.maxBufferSize || 268435456; // 256MB default
-    const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
+    // const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
     // debug.log(`Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
 
     if (outputSize > maxBufferSize) {
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
     }
 
+    console.time('spatial-grid');
     const spatialGrid = buildSpatialGrid(triangles, bounds);
+    console.timeEnd('spatial-grid');
 
     // Create buffers
     const triangleBuffer = device.createBuffer({
@@ -802,7 +814,6 @@ async function rasterizeMesh(triangles, stepSize, filterMode, options = {}) {
 
             const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, {
                 ...tiles[i].bounds,
-                rotationAngleDeg: options.rotationAngleDeg
             });
 
             const tileTime = performance.now() - tileStart;
@@ -2189,15 +2200,8 @@ async function radialRasterize({
     new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
     uniformBuffer.unmap();
 
-    // Create shader and pipeline
-    const shaderModule = device.createShaderModule({ code: radialRasterizeShaderCode });
-    const pipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: {
-            module: shaderModule,
-            entryPoint: 'main'
-        }
-    });
+    // Use cached pipeline (created in initWebGPU)
+    const pipeline = cachedRadialBatchPipeline;
 
     // Create bind group
     const bindGroup = device.createBindGroup({
