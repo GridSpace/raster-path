@@ -39,6 +39,14 @@ let modelRasterPoints = null;
 let toolRasterPoints = null;
 let toolpathPoints = null;
 
+const log_pre = '[App]';
+const debug = {
+    error: function() { console.error(log_pre, ...arguments) },
+    warn: function() { console.warn(log_pre, ...arguments) },
+    log: function() { console.log(log_pre, ...arguments) },
+    ok: function() { console.log(log_pre, '✅', ...arguments) },
+};
+
 // ============================================================================
 // Parameter Persistence
 // ============================================================================
@@ -390,7 +398,7 @@ function applyModelRotation(axis, direction) {
     // Update cached STL with rotated triangles
     modelSTL = createSTLFromTriangles(modelTriangles);
     cacheSTL('model-stl', modelSTL, document.getElementById('model-status').textContent || 'model.stl')
-        .catch(err => console.warn('Failed to cache rotated model:', err));
+        .catch(err => debug.warn('Failed to cache rotated model:', err));
 
     updateButtonStates();
     updateInfo(`Model rotated ${direction > 0 ? '+' : ''}${direction * 90}° around ${axis.toUpperCase()}`);
@@ -431,7 +439,7 @@ function resetModelRotation() {
 
     // Update cache with original STL
     cacheSTL('model-stl', modelSTL, document.getElementById('model-status').textContent || 'model.stl')
-        .catch(err => console.warn('Failed to cache reset model:', err));
+        .catch(err => debug.warn('Failed to cache reset model:', err));
 
     updateButtonStates();
     updateInfo('Model rotation reset');
@@ -555,7 +563,7 @@ async function rasterizeAll() {
         updateButtonStates();
 
     } catch (error) {
-        console.error('Rasterization error:', error);
+        debug.error('Rasterization error:', error);
         updateInfo(`Error: ${error.message}`);
     }
 }
@@ -597,19 +605,19 @@ async function generateToolpath() {
             const numPoints = toolpathData.pathData.length;
             updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
         } else {
-            console.log('Radial toolpaths generated:', toolpathData);
-            console.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
+            // debug.log('[Radial] Toolpaths generated:', toolpathData);
+            debug.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
             updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
 
             // Store terrain strips for visualization
             if (toolpathData.terrainStrips) {
                 modelRasterData = toolpathData.terrainStrips;
-                console.log('[Radial] Terrain strips available:', modelRasterData.length, 'strips');
+                debug.log('[Radial] Terrain strips available:', modelRasterData.length, 'strips');
 
                 // DEBUG: Check X range in strips
                 if (modelRasterData.length > 0) {
                     const strip0 = modelRasterData[0];
-                    console.log('[Radial] Strip 0 structure:', {
+                    debug.log('[Radial] Strip 0 structure:', {
                         angle: strip0.angle,
                         pointCount: strip0.pointCount,
                         positionsLength: strip0.positions?.length,
@@ -626,7 +634,7 @@ async function generateToolpath() {
                             minX = Math.min(minX, x);
                             maxX = Math.max(maxX, x);
                         }
-                        console.log('[Radial] Strip 0 actual X range in positions:', minX.toFixed(2), 'to', maxX.toFixed(2));
+                        debug.log('[Radial] Strip 0 actual X range in positions:', minX.toFixed(2), 'to', maxX.toFixed(2));
                     }
                 }
             } else if (toolpathData.strips && toolpathData.strips[0]?.terrainBounds) {
@@ -635,7 +643,7 @@ async function generateToolpath() {
                     angle: strip.angle,
                     bounds: strip.terrainBounds
                 }));
-                console.log('[Radial] Batched mode: created synthetic terrain strips from bounds:', modelRasterData.length, 'strips');
+                debug.log('[Radial] Batched mode: created synthetic terrain strips from bounds:', modelRasterData.length, 'strips');
             }
             // This is fine - we only need toolpathData for visualization
         }
@@ -646,7 +654,7 @@ async function generateToolpath() {
         updateVisualization();
 
     } catch (error) {
-        console.error('Toolpath generation error:', error);
+        debug.error('Toolpath generation error:', error);
         updateInfo(`Error: ${error.message}`);
     }
 }
@@ -889,13 +897,13 @@ function displayModelRaster(wrapped) {
         // Radial: modelRasterData is an array of strips
         // Each strip has: { angle, positions (sparse XYZ), gridWidth, gridHeight, bounds }
         if (!Array.isArray(modelRasterData)) {
-            console.error('[Display] modelRasterData is not an array of strips');
+            debug.error('[Display] modelRasterData is not an array of strips');
             return;
         }
 
         if (wrapped) {
             // Wrap each strip around X-axis at its angle
-            console.log('[Display] Wrapping', modelRasterData.length, 'strips');
+            debug.log('[Display] Wrapping', modelRasterData.length, 'strips');
 
             // Track overall X range for debug
             let overallMinX = Infinity, overallMaxX = -Infinity;
@@ -929,14 +937,14 @@ function displayModelRaster(wrapped) {
                 }
             }
 
-            console.log('[Display] Rendered', totalPointsRendered, 'points from', modelRasterData.length, 'strips');
-            console.log('[Display] X range: [' + overallMinX.toFixed(2) + ', ' + overallMaxX.toFixed(2) + ']');
+            debug.log('[Display] Rendered', totalPointsRendered, 'points from', modelRasterData.length, 'strips');
+            debug.log('[Display] X range: [' + overallMinX.toFixed(2) + ', ' + overallMaxX.toFixed(2) + ']');
 
             // DEBUG: Check angle coverage
             const angles = modelRasterData.map(s => s.angle).sort((a, b) => a - b);
-            console.log('[Display] Angle range: [' + angles[0].toFixed(1) + '°, ' + angles[angles.length-1].toFixed(1) + '°]');
-            console.log('[Display] First 5 angles:', angles.slice(0, 5).map(a => a.toFixed(1) + '°').join(', '));
-            console.log('[Display] Last 5 angles:', angles.slice(-5).map(a => a.toFixed(1) + '°').join(', '));
+            debug.log('[Display] Angle range: [' + angles[0].toFixed(1) + '°, ' + angles[angles.length-1].toFixed(1) + '°]');
+            debug.log('[Display] First 5 angles:', angles.slice(0, 5).map(a => a.toFixed(1) + '°').join(', '));
+            debug.log('[Display] Last 5 angles:', angles.slice(-5).map(a => a.toFixed(1) + '°').join(', '));
         } else {
             // Show unwrapped (planar) - lay out strips side by side
             for (let stripIdx = 0; stripIdx < modelRasterData.length; stripIdx++) {
@@ -1030,9 +1038,9 @@ function displayToolpaths(wrapped) {
 
         // Check if we need to downsample
         if (totalPoints > MAX_DISPLAY_POINTS) {
-            console.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
-            console.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
-            console.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
+            debug.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
+            debug.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
+            debug.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
             return;
         }
 
@@ -1090,27 +1098,27 @@ function displayToolpaths(wrapped) {
 
     const MAX_DISPLAY_POINTS = 10000000; // 10M points max for display
 
-    console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips,', totalPoints, 'total points');
+    debug.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips,', totalPoints, 'total points');
 
     // Check if we need to skip visualization
     if (totalPoints > MAX_DISPLAY_POINTS) {
-        console.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
-        console.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
-        console.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
+        debug.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
+        debug.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
+        debug.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
         return;
     }
 
     // DEBUG: Check angle distribution AND data
     if (strips.length > 0) {
         const angleChecks = [0, 180, 359, 360, 361, 540, 719].filter(i => i < strips.length);
-        console.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
+        debug.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
         // Check if pathData is actually different between strips
         if (strips.length > 360) {
             const samples0 = strips[0].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
             const samples360 = strips[360].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
-            console.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
-            console.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
-            console.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
+            debug.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
+            debug.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
+            debug.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
         }
     }
 
@@ -1126,7 +1134,7 @@ function displayToolpaths(wrapped) {
             maxVal = Math.max(maxVal, firstStrip.pathData[i]);
         }
 
-        console.log('[Toolpath Display] First strip sample:', {
+        debug.log('[Toolpath Display] First strip sample:', {
             angle: firstStrip.angle,
             numScanlines: firstStrip.numScanlines,
             pointsPerLine: firstStrip.pointsPerLine,
@@ -1258,7 +1266,7 @@ function displayToolpaths(wrapped) {
 // ============================================================================
 
 function updateInfo(text) {
-    console.log(text);
+    debug.log(text);
     document.getElementById('info').textContent = text;
 }
 

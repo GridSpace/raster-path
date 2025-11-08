@@ -61,6 +61,7 @@ let deviceCapabilities = null;
 
 const EMPTY_CELL = -1e10;
 const log_pre = '[Raster Worker]';
+const diagnostic = false;
 
 // url params to control logging
 let { search } = self.location;
@@ -264,7 +265,7 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
 
     const avgPerCell = totalTriangleRefs / totalCells;
 
-    debug.log(`Spatial grid: ${gridWidth}x${gridHeight} ${totalTriangleRefs}refs ~${avgPerCell.toFixed(1)}/${cellSize}mm`);
+    debug.log(`Spatial grid: ${gridWidth}x${gridHeight} ${totalTriangleRefs} tri-refs ~${avgPerCell.toFixed(0)}/${cellSize}mm`);
 
     return {
         gridWidth,
@@ -331,9 +332,9 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
     }
 
-    console.time('spatial-grid');
+    console.time(`${log_pre} Build Spatial Grid`);
     const spatialGrid = buildSpatialGrid(triangles, bounds);
-    console.timeEnd('spatial-grid');
+    console.timeEnd(`${log_pre} Build Spatial Grid`);
 
     // Create buffers
     const triangleBuffer = device.createBuffer({
@@ -2100,8 +2101,10 @@ async function radialRasterize({
     const avgTriangles = bucketTriangleCounts.reduce((a, b) => a + b, 0) / bucketTriangleCounts.length;
     const workPerWorkgroup = maxTriangles * numAngles * bucketGridWidth * gridYHeight;
 
-    debug.log(`[Worker] Radial: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
-    debug.log(`[Worker] Load: min=${minTriangles} max=${maxTriangles} avg=${avgTriangles.toFixed(0)} (${(maxTriangles/avgTriangles).toFixed(2)}x imbalance, worst=${(workPerWorkgroup/1e6).toFixed(1)}M tests)`);
+    if (diagnostic) {
+        debug.log(`Radial: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
+        debug.log(`Load: min=${minTriangles} max=${maxTriangles} avg=${avgTriangles.toFixed(0)} (${(maxTriangles/avgTriangles).toFixed(2)}x imbalance, worst=${(workPerWorkgroup/1e6).toFixed(1)}M tests)`);
+    }
 
     // Reuse buffers if provided, otherwise create new ones
     let triangleBuffer, bucketInfoBuffer, triangleIndicesBuffer;
@@ -2215,7 +2218,6 @@ async function radialRasterize({
         ]
     });
 
-    console.time('RADIAL COMPUTE');
     // Dispatch
     const commandEncoder = device.createCommandEncoder();
     const passEncoder = commandEncoder.beginComputePass();
@@ -2230,7 +2232,7 @@ async function radialRasterize({
     const dispatchX = Math.ceil(numAngles / 8);
     const dispatchY = Math.ceil(gridYHeight / 8);
     const dispatchZ = bucketData.numBuckets;
-    debug.log(`[Worker] Dispatch: (${dispatchX}, ${dispatchY}, ${dispatchZ}) = ${dispatchX * 8} angles, ${dispatchY * 8} Y cells, ${dispatchZ} buckets`);
+    debug.log(`Dispatch: (${dispatchX}, ${dispatchY}, ${dispatchZ}) = ${dispatchX * 8} angles, ${dispatchY * 8} Y cells, ${dispatchZ} buckets`);
 
     passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
     passEncoder.end();
@@ -2246,7 +2248,6 @@ async function radialRasterize({
 
     // CRITICAL: Wait for GPU to finish before reading results
     await device.queue.onSubmittedWorkDone();
-    console.timeEnd('RADIAL COMPUTE');
 
     await stagingBuffer.mapAsync(GPUMapMode.READ);
     const outputData = new Float32Array(stagingBuffer.getMappedRange());
@@ -2312,10 +2313,10 @@ async function radialRasterize({
     timings.stitch = performance.now() - stitchStart;
     const totalTime = performance.now() - timings.start;
 
-    debug.log(`[Worker] Radial complete: ${totalTime.toFixed(0)}ms`);
-    debug.log(`[Worker]   Prep: ${timings.prep.toFixed(0)}ms (${(timings.prep/totalTime*100).toFixed(0)}%)`);
-    debug.log(`[Worker]   GPU:  ${timings.gpu.toFixed(0)}ms (${(timings.gpu/totalTime*100).toFixed(0)}%)`);
-    debug.log(`[Worker]   Stitch: ${timings.stitch.toFixed(0)}ms (${(timings.stitch/totalTime*100).toFixed(0)}%)`);
+    debug.log(`Radial complete: ${totalTime.toFixed(0)}ms`);
+    debug.log(`  Prep: ${timings.prep.toFixed(0)}ms (${(timings.prep/totalTime*100).toFixed(0)}%)`);
+    debug.log(`  GPU:  ${timings.gpu.toFixed(0)}ms (${(timings.gpu/totalTime*100).toFixed(0)}%)`);
+    debug.log(`  Stitch: ${timings.stitch.toFixed(0)}ms (${(timings.stitch/totalTime*100).toFixed(0)}%)`);
 
     const result = { strips, timings };
 
@@ -2416,7 +2417,7 @@ self.onmessage = async function(e) {
                     gridStep: radialGridStep
                 } = data;
 
-                debug.log('[Worker] Starting complete radial toolpath pipeline...');
+                debug.log('Starting complete radial toolpath pipeline...');
 
                 // Batch processing: rasterize angle ranges to avoid memory allocation failure
                 // Calculate safe batch size based on available GPU memory
@@ -2441,16 +2442,16 @@ self.onmessage = async function(e) {
                     ANGLES_PER_BATCH = Math.max(10, Math.min(maxAnglesPerBatch, radialNumAngles));
                     numBatches = Math.ceil(radialNumAngles / ANGLES_PER_BATCH);
                     const batchSizeMB = (ANGLES_PER_BATCH * bytesPerAngle / 1024 / 1024).toFixed(1);
-                    debug.log(`[Worker] Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
-                    debug.log(`[Worker] Total memory: ${totalMemoryMB.toFixed(1)}MB exceeds limit, batching required`);
-                    debug.log(`[Worker] Batch size: ${ANGLES_PER_BATCH} angles (~${batchSizeMB}MB per batch)`);
-                    debug.log(`[Worker] Processing ${radialNumAngles} angles in ${numBatches} batch(es)`);
+                    debug.log(`Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
+                    debug.log(`Total memory: ${totalMemoryMB.toFixed(1)}MB exceeds limit, batching required`);
+                    debug.log(`Batch size: ${ANGLES_PER_BATCH} angles (~${batchSizeMB}MB per batch)`);
+                    debug.log(`Processing ${radialNumAngles} angles in ${numBatches} batch(es)`);
                 } else {
                     // Process all angles at once
                     ANGLES_PER_BATCH = radialNumAngles;
                     numBatches = 1;
-                    debug.log(`[Worker] Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
-                    debug.log(`[Worker] Total memory: ${totalMemoryMB.toFixed(1)}MB fits in buffer, processing all ${radialNumAngles} angles in single batch`);
+                    debug.log(`Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
+                    debug.log(`Total memory: ${totalMemoryMB.toFixed(1)}MB fits in buffer, processing all ${radialNumAngles} angles in single batch`);
                 }
 
                 const allStripToolpaths = [];
@@ -2459,14 +2460,14 @@ self.onmessage = async function(e) {
 
                 // Prepare sparse tool once
                 const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
-                debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
+                debug.log(`Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
 
                 // Create reusable rasterization buffers if batching (numBatches > 1)
                 // These buffers (triangles, buckets, indices) don't change between batches
                 let batchReuseBuffers = null;
                 if (numBatches > 1) {
                     // First batch will create buffers, then we'll reuse them
-                    debug.log(`[Worker] Batching mode: will create reusable buffers in first batch`);
+                    debug.log(`Batching mode: will create reusable buffers in first batch`);
                 }
 
                 for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
@@ -2475,7 +2476,7 @@ self.onmessage = async function(e) {
                     const batchNumAngles = endAngleIdx - startAngleIdx;
                     const batchStartAngle = startAngleIdx * radialAngleStep;
 
-                    debug.log(`[Worker] Batch ${batchIdx + 1}/${numBatches}: angles ${startAngleIdx}-${endAngleIdx - 1} (${batchNumAngles} angles), startAngle=${batchStartAngle.toFixed(1)}°`);
+                    debug.log(`Batch ${batchIdx + 1}/${numBatches}: angles ${startAngleIdx}-${endAngleIdx - 1} (${batchNumAngles} angles), startAngle=${batchStartAngle.toFixed(1)}°`);
 
                     // Rasterize this batch of strips
                     const shouldReturnBuffers = (batchIdx === 0 && numBatches > 1);  // First batch of multi-batch operation
@@ -2497,10 +2498,11 @@ self.onmessage = async function(e) {
                     // Capture buffers from first batch for reuse
                     if (batchIdx === 0 && batchModelResult.reusableBuffers) {
                         batchReuseBuffers = batchModelResult.reusableBuffers;
-                        debug.log(`[Worker] Cached GPU buffers from first batch for reuse`);
+                        debug.log(`Cached GPU buffers from first batch for reuse`);
                     }
 
-                    debug.log(`[Worker] Batch ${batchIdx + 1}: Rasterized ${batchModelResult.strips.length} strips, first angle=${batchModelResult.strips[0]?.angle.toFixed(1)}°, last angle=${batchModelResult.strips[batchModelResult.strips.length - 1]?.angle.toFixed(1)}°`);
+                    if (diagnostic)
+                    debug.log(`Batch ${batchIdx + 1}: Rasterized ${batchModelResult.strips.length} strips, first angle=${batchModelResult.strips[0]?.angle.toFixed(1)}°, last angle=${batchModelResult.strips[batchModelResult.strips.length - 1]?.angle.toFixed(1)}°`);
 
                     // Find max dimensions for this batch
                     let maxStripWidth = 0;
@@ -2514,7 +2516,8 @@ self.onmessage = async function(e) {
                     const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
 
                     // Generate toolpaths for this batch
-                    debug.log(`[Worker] Batch ${batchIdx + 1}: Generating toolpaths for ${batchModelResult.strips.length} strips...`);
+                    if (diagnostic)
+                    debug.log(`Batch ${batchIdx + 1}: Generating toolpaths for ${batchModelResult.strips.length} strips...`);
                     for (let i = 0; i < batchModelResult.strips.length; i++) {
                         const strip = batchModelResult.strips[i];
                         const globalStripIdx = startAngleIdx + i;
@@ -2535,8 +2538,8 @@ self.onmessage = async function(e) {
 
                         // DEBUG: Diagnostic logging (BUILD_ID gets injected during build)
                         // Used to trace data flow through radial toolpath pipeline
-                        if (globalStripIdx === 0 || globalStripIdx === 360) {
-                            debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) INPUT terrain first 5 Z values: ${strip.positions.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
+                        if (diagnostic && (globalStripIdx === 0 || globalStripIdx === 360)) {
+                            debug.log(`BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) INPUT terrain first 5 Z values: ${strip.positions.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
                         }
 
                         const stripToolpathResult = await runToolpathComputeWithBuffers(
@@ -2551,8 +2554,8 @@ self.onmessage = async function(e) {
                         );
 
                         // DEBUG: Verify toolpath generation output
-                        if (globalStripIdx === 0 || globalStripIdx === 360) {
-                            debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) OUTPUT toolpath first 5 Z values: ${stripToolpathResult.pathData.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
+                        if (diagnostic && (globalStripIdx === 0 || globalStripIdx === 360)) {
+                            debug.log(`BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) OUTPUT toolpath first 5 Z values: ${stripToolpathResult.pathData.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
                         }
 
                         allStripToolpaths.push({
@@ -2568,7 +2571,8 @@ self.onmessage = async function(e) {
 
                     destroyReusableToolpathBuffers(reusableBuffers);
 
-                    debug.log(`[Worker] Batch ${batchIdx + 1}: Completed, allStripToolpaths now has ${allStripToolpaths.length} strips total`);
+                    if (diagnostic)
+                    debug.log(`Batch ${batchIdx + 1}: Completed, allStripToolpaths now has ${allStripToolpaths.length} strips total`);
 
                     // Free batch terrain data
                     for (const strip of batchModelResult.strips) {
@@ -2581,11 +2585,11 @@ self.onmessage = async function(e) {
                     batchReuseBuffers.triangleBuffer.destroy();
                     batchReuseBuffers.bucketInfoBuffer.destroy();
                     batchReuseBuffers.triangleIndicesBuffer.destroy();
-                    debug.log(`[Worker] Destroyed cached GPU buffers after all batches`);
+                    debug.log(`Destroyed cached GPU buffers after all batches`);
                 }
 
                 const pipelineTotalTime = performance.now() - pipelineStartTime;
-                debug.log(`[Worker] Complete radial toolpath: ${allStripToolpaths.length} strips, ${totalToolpathPoints} total points in ${pipelineTotalTime.toFixed(0)}ms`);
+                debug.log(`Complete radial toolpath: ${allStripToolpaths.length} strips, ${totalToolpathPoints} total points in ${pipelineTotalTime.toFixed(0)}ms`);
 
                 const toolpathTransferBuffers = allStripToolpaths.map(strip => strip.pathData.buffer);
 
