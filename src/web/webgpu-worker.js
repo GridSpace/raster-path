@@ -173,13 +173,13 @@ async function initWebGPU() {
 }
 
 // Planar rasterization with spatial partitioning
-const rasterizeShaderCode = /*SHADER:planar-rasterize*/;
+const rasterizeShaderCode = 'SHADER:planar-rasterize';
 
 // Planar toolpath generation
-const toolpathShaderCode = /*SHADER:planar-toolpath*/;
+const toolpathShaderCode = 'SHADER:planar-toolpath';
 
 // Radial: Rasterization with rotating ray planes and X-bucketing
-const radialRasterizeShaderCode = /*SHADER:radial-raster*/;
+const radialRasterizeShaderCode = 'SHADER:radial-raster';
 
 // Calculate bounding box from triangle vertices
 function calculateBounds(triangles) {
