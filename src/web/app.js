@@ -492,6 +492,10 @@ async function loadSTLFile(isModel) {
             const cacheKey = isModel ? 'model-stl' : 'tool-stl';
             await cacheSTL(cacheKey, arrayBuffer, file.name);
 
+            modelRasterData = undefined;
+            toolpathData = undefined;
+            updateVisualization();
+
             updateInfo(`Loaded ${file.name}: ${(triangles.length / 9).toLocaleString()} triangles`);
             resolve({ arrayBuffer, triangles, name: file.name });
         };
@@ -1051,7 +1055,9 @@ function displayToolRaster() {
 }
 
 function displayToolpaths(wrapped) {
-    if (!toolpathData) return;
+    if (!toolpathData) {
+        return;
+    }
 
     if (mode === 'planar') {
         // Planar toolpaths
