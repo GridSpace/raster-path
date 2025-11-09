@@ -397,45 +397,25 @@ function applyModelRotation(axis, direction) {
     // Rotate the mesh using Three.js
     const angle = direction * Math.PI / 2;
     if (axis === 'x') {
-        modelMesh.rotateX(angle);
+        modelMesh.rotateX(-angle);
     } else if (axis === 'y') {
         modelMesh.rotateY(angle);
     } else if (axis === 'z') {
-        modelMesh.rotateZ(angle);
+        modelMesh.rotateZ(-angle);
     }
 
-    // Update triangle data by applying the mesh's world matrix
-    modelMesh.updateMatrixWorld(true);
-    const positionAttr = modelMesh.geometry.attributes.position;
-    modelTriangles = new Float32Array(positionAttr.count * 3);
+    let { geometry } = modelMesh;
 
-    for (let i = 0; i < positionAttr.count; i++) {
-        const vertex = new THREE.Vector3(
-            positionAttr.getX(i),
-            positionAttr.getY(i),
-            positionAttr.getZ(i)
-        );
-        vertex.applyMatrix4(modelMesh.matrixWorld);
-        modelTriangles[i * 3] = vertex.x;
-        modelTriangles[i * 3 + 1] = vertex.y;
-        modelTriangles[i * 3 + 2] = vertex.z;
-    }
-
-    // Reset mesh matrix and update geometry with rotated vertices
-    modelMesh.rotation.set(0, 0, 0);
     modelMesh.updateMatrix();
+    geometry.applyMatrix4(modelMesh.matrix);
+    modelMesh.position.set(0, 0, 0);
+    modelMesh.rotation.set(0, 0, 0);
+    modelMesh.scale.set(1, 1, 1);
     modelMesh.updateMatrixWorld(true);
-
-    for (let i = 0; i < positionAttr.count; i++) {
-        positionAttr.setXYZ(i,
-            modelTriangles[i * 3],
-            modelTriangles[i * 3 + 1],
-            modelTriangles[i * 3 + 2]
-        );
-    }
-    positionAttr.needsUpdate = true;
-    modelMesh.geometry.computeVertexNormals();
-    modelMesh.geometry.computeBoundingBox();
+    geometry.attributes.position.needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
 
     // Clear raster and toolpath data (needs recomputation)
     modelRasterData = null;
