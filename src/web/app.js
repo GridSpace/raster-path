@@ -1370,9 +1370,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (cachedTool) {
         // Handle both old format (raw ArrayBuffer) and new format (object with arrayBuffer and name)
         const isOldFormat = cachedTool instanceof ArrayBuffer;
-        toolSTL = isOldFormat ? cachedTool : cachedTool.arrayBuffer;
-        toolTriangles = parseSTL(toolSTL);
+        toolOriginalSTL = isOldFormat ? cachedTool : cachedTool.arrayBuffer;
+        toolOriginalTriangles = parseSTL(toolOriginalSTL);
+
+        // Scale tool to target size
+        const originalDiameter = calculateToolDiameter(toolOriginalTriangles);
+        toolTriangles = scaleToolTriangles(toolOriginalTriangles, toolSize);
+        toolSTL = createSTLFromTriangles(toolTriangles);
+
+        // Update status
         document.getElementById('tool-status').textContent = isOldFormat ? 'Cached tool' : (cachedTool.name || 'Cached tool');
+        document.getElementById('tool-size-status').textContent =
+            `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
+
         displayToolMesh();
     }
 
@@ -1454,7 +1464,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     // Tool size change
-    document.getElementById('tool-size').addEventListener('change', (e) => {
+    document.getElementById('tool-size').addEventListener('change', async (e) => {
         toolSize = parseFloat(e.target.value);
 
         // If tool is loaded, rescale it
@@ -1467,13 +1477,33 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('tool-size-status').textContent =
                 `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
 
+            // Check if tool was already loaded (before clearing)
+            const wasToolLoaded = toolRasterData !== null;
+
             // Clear raster data (tool size changed)
             toolRasterData = null;
             toolpathData = null;
 
             displayToolMesh();
+
+            // If rasterPath exists and tool was already loaded, reload it with new size
+            if (rasterPath && wasToolLoaded) {
+                updateInfo(`Reloading tool at ${toolSize}mm...`);
+                try {
+                    const t0 = performance.now();
+                    toolRasterData = await rasterPath.loadTool({
+                        triangles: toolTriangles
+                    });
+                    const t1 = performance.now();
+                    updateInfo(`Tool reloaded at ${toolSize}mm in ${(t1 - t0).toFixed(0)}ms`);
+                } catch (error) {
+                    updateInfo(`Error reloading tool: ${error.message}`);
+                }
+            } else {
+                updateInfo(`Tool size changed to ${toolSize}mm - click Rasterize to apply`);
+            }
+
             updateButtonStates();
-            updateInfo(`Tool size changed to ${toolSize}mm`);
         }
 
         saveParameters();

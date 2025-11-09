@@ -273,7 +273,12 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
 
     const avgPerCell = totalTriangleRefs / totalCells;
 
-    debug.log(`Spatial grid: ${gridWidth}x${gridHeight} ${totalTriangleRefs} tri-refs ~${avgPerCell.toFixed(0)}/${cellSize}mm`);
+    // Calculate actual tool diameter from bounds for logging
+    const toolWidth = bounds.max.x - bounds.min.x;
+    const toolHeight = bounds.max.y - bounds.min.y;
+    const toolDiameter = Math.max(toolWidth, toolHeight);
+
+    debug.log(`Spatial grid: ${gridWidth}x${gridHeight} ${totalTriangleRefs} tri-refs ~${avgPerCell.toFixed(0)}/${cellSize}mm cell (tool: ${toolDiameter.toFixed(2)}mm)`);
 
     return {
         gridWidth,
