@@ -12,13 +12,16 @@ let zFloor = -100;
 let xStep = 5;
 let yStep = 5;
 let angleStep = 1.0; // degrees
+let toolSize = 2.5; // mm - target tool diameter
 
 let modelSTL = null;  // ArrayBuffer (current, possibly rotated)
 let modelOriginalSTL = null;  // ArrayBuffer (original, for reset)
 let toolSTL = null;   // ArrayBuffer
+let toolOriginalSTL = null;  // ArrayBuffer (original, for reset/scaling)
 
 let modelTriangles = null;  // Float32Array
 let toolTriangles = null;   // Float32Array
+let toolOriginalTriangles = null;  // Float32Array (original, unscaled)
 
 let modelRasterData = null;
 let toolRasterData = null;
@@ -58,6 +61,7 @@ function saveParameters() {
     localStorage.setItem('raster-xStep', xStep);
     localStorage.setItem('raster-yStep', yStep);
     localStorage.setItem('raster-angleStep', angleStep);
+    localStorage.setItem('raster-toolSize', toolSize);
 
     // Save view checkboxes
     const showWrappedCheckbox = document.getElementById('show-wrapped');
@@ -120,6 +124,12 @@ function loadParameters() {
     if (savedAngleStep !== null) {
         angleStep = parseFloat(savedAngleStep);
         document.getElementById('angle-step').value = angleStep;
+    }
+
+    const savedToolSize = localStorage.getItem('raster-toolSize');
+    if (savedToolSize !== null) {
+        toolSize = parseFloat(savedToolSize);
+        document.getElementById('tool-size').value = toolSize;
     }
 
     // Restore view checkboxes
@@ -197,6 +207,37 @@ function calculateTriangleBounds(triangles) {
         bounds.max.z = Math.max(bounds.max.z, triangles[i + 2]);
     }
     return bounds;
+}
+
+// Calculate current tool diameter from XY dimensions
+function calculateToolDiameter(triangles) {
+    if (!triangles || triangles.length === 0) return 0;
+
+    const bounds = calculateTriangleBounds(triangles);
+    const xSize = bounds.max.x - bounds.min.x;
+    const ySize = bounds.max.y - bounds.min.y;
+
+    // Return the maximum of X and Y dimensions as the diameter
+    return Math.max(xSize, ySize);
+}
+
+// Scale tool triangles to target diameter
+function scaleToolTriangles(triangles, targetDiameter) {
+    if (!triangles || triangles.length === 0) return triangles;
+
+    const currentDiameter = calculateToolDiameter(triangles);
+    if (currentDiameter === 0) return triangles;
+
+    const scale = targetDiameter / currentDiameter;
+    const scaled = new Float32Array(triangles.length);
+
+    for (let i = 0; i < triangles.length; i += 3) {
+        scaled[i] = triangles[i] * scale;       // X
+        scaled[i + 1] = triangles[i + 1] * scale; // Y
+        scaled[i + 2] = triangles[i + 2] * scale; // Z
+    }
+
+    return scaled;
 }
 
 function parseSTL(arrayBuffer) {
@@ -1412,6 +1453,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateButtonStates();
     });
 
+    // Tool size change
+    document.getElementById('tool-size').addEventListener('change', (e) => {
+        toolSize = parseFloat(e.target.value);
+
+        // If tool is loaded, rescale it
+        if (toolOriginalTriangles) {
+            const originalDiameter = calculateToolDiameter(toolOriginalTriangles);
+            toolTriangles = scaleToolTriangles(toolOriginalTriangles, toolSize);
+            toolSTL = createSTLFromTriangles(toolTriangles);
+
+            // Update status
+            document.getElementById('tool-size-status').textContent =
+                `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
+
+            // Clear raster data (tool size changed)
+            toolRasterData = null;
+            toolpathData = null;
+
+            displayToolMesh();
+            updateButtonStates();
+            updateInfo(`Tool size changed to ${toolSize}mm`);
+        }
+
+        saveParameters();
+    });
+
     // Model rotation buttons
     document.querySelectorAll('.rotate-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1446,9 +1513,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('load-tool').addEventListener('click', async () => {
         const result = await loadSTLFile(false);
         if (result) {
-            toolSTL = result.arrayBuffer;
-            toolTriangles = result.triangles;
+            toolOriginalSTL = result.arrayBuffer;
+            toolOriginalTriangles = result.triangles;
+
+            // Calculate original diameter and scale to target size
+            const originalDiameter = calculateToolDiameter(toolOriginalTriangles);
+            toolTriangles = scaleToolTriangles(toolOriginalTriangles, toolSize);
+            toolSTL = createSTLFromTriangles(toolTriangles);
+
+            // Update status with size info
             document.getElementById('tool-status').textContent = result.name;
+            document.getElementById('tool-size-status').textContent =
+                `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
 
             // Clear raster data
             toolRasterData = null;

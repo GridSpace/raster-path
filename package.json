@@ -38,7 +38,8 @@
     "test:planar-tiling": "npm run build && npx electron src/test/planar-tiling-test.cjs",
     "test:radial": "npm run build && npx electron src/test/radial-test.cjs",
     "test:batch-divisor": "npm run build && npx electron src/test/batch-divisor-benchmark.cjs",
-    "test:work-estimation": "npm run build && npx electron src/test/work-estimation-profile.cjs"
+    "test:work-estimation": "npm run build && npx electron src/test/work-estimation-profile.cjs",
+    "test:workload-calibration": "npm run build && npx electron src/test/workload-calibration.cjs"
   },
   "keywords": [
     "cnc",
