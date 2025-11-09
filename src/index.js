@@ -104,18 +104,13 @@ export class RasterPath {
         this.deviceCapabilities = null;
 
         // Configure debug output
-        let urlOpt = [];
         if (config.quiet) {
             debug.log = function() {};
-            urlOpt.push('quiet');
-        }
-        if (config.debug) {
-            urlOpt.push('debug');
         }
 
         // Configuration with defaults
         this.config = {
-            workerName: (config.workerName ?? "webgpu-worker.js") + (urlOpt.length ? "?"+urlOpt.join('&') : ""),
+            workerName: config.workerName ?? "webgpu-worker.js",
             maxGPUMemoryMB: config.maxGPUMemoryMB ?? 256,
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             autoTiling: config.autoTiling ?? true,
@@ -124,7 +119,11 @@ export class RasterPath {
             trianglesPerTile: config.trianglesPerTile, // undefined = auto-calculate
             radialRotationOffset: config.radialRotationOffset ?? 0, // degrees
             batchDivisor: config.batchDivisor ?? 1, // For testing batching overhead
+            debug: config.debug,
+            quiet: config.quiet
         };
+
+        debug.log('config', this.config);
     }
 
     /**
@@ -286,6 +285,8 @@ export class RasterPath {
         if (!this.toolData) {
             throw new Error('Tool not loaded. Call loadTool() first.');
         }
+
+        debug.log('gen.paths', { xStep, yStep, zFloor });
 
         if (this.mode === 'planar') {
             if (!this.terrainData) {

@@ -517,7 +517,6 @@ async function initRasterPath() {
         mode: mode,
         resolution: resolution,
         rotationStep: mode === 'radial' ? angleStep : undefined,
-        // trianglesPerTile: 15000,
         debug: true  // Enable debug logging
     });
 

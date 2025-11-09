@@ -48,7 +48,7 @@
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-let config = null;
+let config = {};
 let device = null;
 let deviceCapabilities = null;
 let isInitialized = false;
@@ -58,22 +58,17 @@ let cachedToolpathPipeline = null;
 let cachedToolpathShaderModule = null;
 let cachedRadialBatchPipeline = null;
 let cachedRadialBatchShaderModule = null;
+let lastlog;
 
 const EMPTY_CELL = -1e10;
 const log_pre = '[Worker]';
 const diagnostic = false;
 
-// url params to control logging
-let { search } = self.location;
-let verbose = search.indexOf('debug') >= 0;
-let quiet = search.indexOf('quiet') >= 0;
-let lastlog;
-
 const debug = {
     error: function() { console.error(log_pre, ...arguments) },
     warn: function() { console.warn(log_pre, ...arguments) },
     log: function() {
-        if (!quiet) {
+        if (!config.quiet) {
             let now = performance.now();
             let since = ((now - (lastlog ?? now)) | 0).toString().padStart(4,' ');
             console.log(log_pre, `[${since}]`, ...arguments);
@@ -488,7 +483,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         result = new Float32Array(outputData);
         pointCount = totalGridPoints;
 
-        if (verbose) {
+        if (config.debug) {
             // Count valid points for logging (sentinel value = -1e10)
             let zeroCount = 0;
             let validCount = 0;
