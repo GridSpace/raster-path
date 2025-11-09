@@ -55,6 +55,7 @@
  * @property {number} resolution - Grid step size in mm (required)
  * @property {number} rotationStep - Radial mode only: degrees between rays (e.g., 1.0 = 360 rays)
  * @property {number} trianglesPerTile - Target triangles per tile for radial rasterization (default: calculated)
+ * @property {number} batchDivisor - Testing parameter to artificially divide batch size (default: 1)
  * @property {boolean} debug - Enable debug logging (default: false)
  * @property {boolean} quiet - Suppress log output (default: false)
  */
@@ -122,6 +123,7 @@ export class RasterPath {
             maxConcurrentTiles: config.maxConcurrentTiles ?? 10,
             trianglesPerTile: config.trianglesPerTile, // undefined = auto-calculate
             radialRotationOffset: config.radialRotationOffset ?? 0, // degrees
+            batchDivisor: config.batchDivisor ?? 1, // For testing batching overhead
         };
     }
 

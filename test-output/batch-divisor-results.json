@@ -1,0 +1,97 @@
+{
+  "timestamp": "2025-11-08T22:35:52.874Z",
+  "divisors": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32
+  ],
+  "results": [
+    {
+      "success": true,
+      "divisor": 1,
+      "timing": {
+        "tool": 14.5,
+        "terrain": 4,
+        "toolpath": 2849.600000023842,
+        "total": 2868.100000023842
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "divisor": 2,
+      "timing": {
+        "tool": 12.800000011920929,
+        "terrain": 1.5,
+        "toolpath": 2733.699999988079,
+        "total": 2748
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "divisor": 4,
+      "timing": {
+        "tool": 12.400000035762787,
+        "terrain": 1.5,
+        "toolpath": 2851.2999999523163,
+        "total": 2865.199999988079
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "divisor": 8,
+      "timing": {
+        "tool": 12.5,
+        "terrain": 4.300000011920929,
+        "toolpath": 3040.5,
+        "total": 3057.300000011921
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "divisor": 16,
+      "timing": {
+        "tool": 13.699999988079071,
+        "terrain": 9,
+        "toolpath": 3473.300000011921,
+        "total": 3496
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "divisor": 32,
+      "timing": {
+        "tool": 13,
+        "terrain": 1.9000000357627869,
+        "toolpath": 3909.399999976158,
+        "total": 3924.300000011921
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    }
+  ]
+}
