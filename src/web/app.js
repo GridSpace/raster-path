@@ -62,6 +62,7 @@ function saveParameters() {
     localStorage.setItem('raster-yStep', yStep);
     localStorage.setItem('raster-angleStep', angleStep);
     localStorage.setItem('raster-toolSize', toolSize);
+    console.log(`[App] Saved tool size: ${toolSize}mm`);
 
     // Save view checkboxes
     const showWrappedCheckbox = document.getElementById('show-wrapped');
@@ -129,7 +130,11 @@ function loadParameters() {
     const savedToolSize = localStorage.getItem('raster-toolSize');
     if (savedToolSize !== null) {
         toolSize = parseFloat(savedToolSize);
-        document.getElementById('tool-size').value = toolSize;
+        // Format to match dropdown option values (e.g., "3.0" not "3")
+        document.getElementById('tool-size').value = toolSize.toFixed(1);
+        console.log(`[App] Restored tool size: ${toolSize}mm`);
+    } else {
+        console.log(`[App] No saved tool size, using default: ${toolSize}mm`);
     }
 
     // Restore view checkboxes
