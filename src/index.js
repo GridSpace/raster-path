@@ -445,8 +445,7 @@ export class RasterPath {
                     zFloor: zFloor,
                     bounds,
                     xStep,
-                    yStep,
-                    gridStep: this.resolution
+                    yStep
                 },
                 'radial-toolpaths-complete',
                 completionHandler

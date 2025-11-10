@@ -1677,7 +1677,8 @@ async function radialRasterize({
     bounds,
     startAngle = 0,
     reusableBuffers = null,
-    returnBuffersForReuse = false
+    returnBuffersForReuse = false,
+    batchInfo = {}
 }) {
     if (!device) {
         throw new Error('WebGPU not initialized');
@@ -1917,10 +1918,12 @@ async function radialRasterize({
     timings.stitch = performance.now() - stitchStart;
     const totalTime = performance.now() - timings.start;
 
-    debug.log(`Radial complete: ${totalTime.toFixed(0)}ms`);
-    debug.log(`  Prep: ${timings.prep.toFixed(0)}ms (${(timings.prep/totalTime*100).toFixed(0)}%)`);
-    debug.log(`  GPU:  ${timings.gpu.toFixed(0)}ms (${(timings.gpu/totalTime*100).toFixed(0)}%)`);
-    debug.log(`  Stitch: ${timings.stitch.toFixed(0)}ms (${(timings.stitch/totalTime*100).toFixed(0)}%)`);
+    Object.assign(batchInfo, {
+        'prep': (timings.prep | 0),
+        'gpu': (timings.gpu | 0),
+        'stitch': (timings.stitch | 0),
+        'raster': (totalTime | 0)
+    });
 
     const result = { strips, timings };
 
@@ -2018,11 +2021,10 @@ self.onmessage = async function(e) {
                     zFloor: radialToolpathZFloor,
                     bounds: radialToolpathBounds,
                     xStep: radialXStep,
-                    yStep: radialYStep,
-                    gridStep: radialGridStep
+                    yStep: radialYStep
                 } = data;
 
-                debug.log('Starting complete radial toolpath pipeline...');
+                debug.log('radial-generate-toolpaths', data);
 
                 // Batch processing: rasterize angle ranges to avoid memory allocation failure
                 // Calculate safe batch size based on available GPU memory
@@ -2045,11 +2047,10 @@ self.onmessage = async function(e) {
                 if (totalMemoryMB > MAX_BUFFER_SIZE_MB) {
                     // Need to batch
                     const maxAnglesPerBatch = Math.floor((MAX_BUFFER_SIZE_MB * 1024 * 1024) / bytesPerAngle);
-
                     // Apply batch divisor for overhead testing
                     const adjustedMaxAngles = Math.floor(maxAnglesPerBatch / batchDivisor);
 
-                    ANGLES_PER_BATCH = Math.max(10, Math.min(adjustedMaxAngles, radialNumAngles));
+                    ANGLES_PER_BATCH = Math.max(1, Math.min(adjustedMaxAngles, radialNumAngles));
                     numBatches = Math.ceil(radialNumAngles / ANGLES_PER_BATCH);
                     const batchSizeMB = (ANGLES_PER_BATCH * bytesPerAngle / 1024 / 1024).toFixed(1);
                     debug.log(`Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
@@ -2086,10 +2087,7 @@ self.onmessage = async function(e) {
                 // Create reusable rasterization buffers if batching (numBatches > 1)
                 // These buffers (triangles, buckets, indices) don't change between batches
                 let batchReuseBuffers = null;
-                if (numBatches > 1) {
-                    // First batch will create buffers, then we'll reuse them
-                    debug.log(`Batching mode: will create reusable buffers in first batch`);
-                }
+                let batchTracking = [];
 
                 for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
                     const batchStartTime = performance.now();
@@ -2097,6 +2095,12 @@ self.onmessage = async function(e) {
                     const endAngleIdx = Math.min(startAngleIdx + ANGLES_PER_BATCH, radialNumAngles);
                     const batchNumAngles = endAngleIdx - startAngleIdx;
                     const batchStartAngle = startAngleIdx * radialAngleStep;
+
+                    const batchInfo = {
+                        from: startAngleIdx,
+                        to: endAngleIdx
+                    };
+                    batchTracking.push(batchInfo);
 
                     debug.log(`Batch ${batchIdx + 1}/${numBatches}: angles ${startAngleIdx}-${endAngleIdx - 1} (${batchNumAngles} angles), startAngle=${batchStartAngle.toFixed(1)}°`);
 
@@ -2115,7 +2119,8 @@ self.onmessage = async function(e) {
                         bounds: radialToolpathBounds,
                         startAngle: batchStartAngle,
                         reusableBuffers: batchReuseBuffers,
-                        returnBuffersForReuse: shouldReturnBuffers
+                        returnBuffersForReuse: shouldReturnBuffers,
+                        batchInfo
                     });
 
                     const rasterTime = performance.now() - rasterStartTime;
@@ -2123,11 +2128,8 @@ self.onmessage = async function(e) {
                     // Capture buffers from first batch for reuse
                     if (batchIdx === 0 && batchModelResult.reusableBuffers) {
                         batchReuseBuffers = batchModelResult.reusableBuffers;
-                        debug.log(`Cached GPU buffers from first batch for reuse`);
+                        // debug.log(`Cached GPU buffers from first batch for reuse`);
                     }
-
-                    if (diagnostic)
-                    debug.log(`Batch ${batchIdx + 1}: Rasterized ${batchModelResult.strips.length} strips, first angle=${batchModelResult.strips[0]?.angle.toFixed(1)}°, last angle=${batchModelResult.strips[batchModelResult.strips.length - 1]?.angle.toFixed(1)}°`);
 
                     // Find max dimensions for this batch
                     const dimStartTime = performance.now();
@@ -2146,8 +2148,7 @@ self.onmessage = async function(e) {
 
                     // Generate toolpaths for this batch
                     const toolpathStartTime = performance.now();
-                    // if (diagnostic)
-                    debug.log(`Batch ${batchIdx + 1}: Generating toolpaths for ${batchModelResult.strips.length} strips...`);
+
                     for (let i = 0; i < batchModelResult.strips.length; i++) {
                         const strip = batchModelResult.strips[i];
                         const globalStripIdx = startAngleIdx + i;
@@ -2200,24 +2201,22 @@ self.onmessage = async function(e) {
                     }
                     const toolpathTime = performance.now() - toolpathStartTime;
 
-                    const bufferDestroyStartTime = performance.now();
-                    destroyReusableToolpathBuffers(reusableBuffers);
-                    const bufferDestroyTime = performance.now() - bufferDestroyStartTime;
-
                     // Free batch terrain data
-                    const cleanupStartTime = performance.now();
                     for (const strip of batchModelResult.strips) {
                         strip.positions = null;
                     }
-                    const cleanupTime = performance.now() - cleanupStartTime;
+                    destroyReusableToolpathBuffers(reusableBuffers);
 
                     const batchTotalTime = performance.now() - batchStartTime;
 
-                    // Log detailed timing breakdown for this batch
-                    debug.log(`Batch ${batchIdx + 1} timing: Total=${batchTotalTime.toFixed(0)}ms, Raster=${rasterTime.toFixed(0)}ms, FindDims=${dimTime.toFixed(1)}ms, CreateBuf=${bufferCreateTime.toFixed(0)}ms, Toolpath=${toolpathTime.toFixed(0)}ms, DestroyBuf=${bufferDestroyTime.toFixed(0)}ms, Cleanup=${cleanupTime.toFixed(1)}ms`);
-                    // if (diagnostic)
-                    debug.log(`Batch ${batchIdx + 1}: Completed, allStripToolpaths now has ${allStripToolpaths.length} strips total`);
+                    Object.assign(batchInfo, {
+                        'paths': (toolpathTime | 0),
+                        'strips': allStripToolpaths.length,
+                        'total': (batchTotalTime | 0)
+                    });
                 }
+
+                console.table(batchTracking);
 
                 // Cleanup cached rasterization buffers after all batches complete
                 if (batchReuseBuffers) {

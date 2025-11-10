@@ -517,7 +517,8 @@ async function initRasterPath() {
         mode: mode,
         resolution: resolution,
         rotationStep: mode === 'radial' ? angleStep : undefined,
-        debug: true  // Enable debug logging
+        batchDivisor: 1,
+        debug: true
     });
 
     await rasterPath.init();
@@ -536,7 +537,6 @@ async function rasterizeAll() {
 
         // Load tool (works for both modes)
         if (toolTriangles) {
-            updateInfo('Loading tool...');
             const t0 = performance.now();
             toolRasterData = await rasterPath.loadTool({
                 triangles: toolTriangles
@@ -566,14 +566,13 @@ async function rasterizeAll() {
 
             // Load terrain (stores triangles for later, doesn't rasterize yet)
             if (modelTriangles) {
-                updateInfo('Loading terrain...');
                 const t0 = performance.now();
                 await rasterPath.loadTerrain({
                     triangles: modelTriangles,
                     zFloor: zFloor
                 });
                 const t1 = performance.now();
-                updateInfo(`Terrain loaded in ${(t1 - t0).toFixed(0)}ms (will rasterize during toolpath generation)`);
+                updateInfo(`Terrain loaded in ${(t1 - t0).toFixed(0)}ms (rasterized in toolpath generation)`);
             } else {
                 updateInfo('Tool loaded. Load model and click "Generate Toolpath" to continue.');
             }
