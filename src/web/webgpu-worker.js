@@ -1706,19 +1706,43 @@ async function radialRasterize({
     const avgTriangles = bucketTriangleCounts.reduce((a, b) => a + b, 0) / bucketTriangleCounts.length;
     const workPerWorkgroup = maxTriangles * numAngles * bucketGridWidth * gridYHeight;
 
+    // Determine bucket batching to avoid GPU timeouts
+    // Target: keep max work per batch under ~1M ray-triangle tests
+    const maxWorkPerBatch = 1e6;
+    const estimatedWorkPerBucket = avgTriangles * numAngles * bucketGridWidth * gridYHeight;
+
+    // Calculate buckets per batch, but enforce reasonable limits
+    // - Minimum: 10 buckets per batch (unless total < 10)
+    // - Maximum: all buckets if work is reasonable
+    let maxBucketsPerBatch;
+    if (estimatedWorkPerBucket === 0) {
+        maxBucketsPerBatch = bucketData.numBuckets; // Empty model
+    } else {
+        const idealBucketsPerBatch = Math.floor(maxWorkPerBatch / estimatedWorkPerBucket);
+        const minBucketsPerBatch = Math.min(3, bucketData.numBuckets);
+        maxBucketsPerBatch = Math.max(minBucketsPerBatch, idealBucketsPerBatch);
+        // Cap at total buckets
+        maxBucketsPerBatch = Math.min(maxBucketsPerBatch, bucketData.numBuckets);
+    }
+
+    const numBucketBatches = Math.ceil(bucketData.numBuckets / maxBucketsPerBatch);
+
     if (diagnostic) {
         debug.log(`Radial: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
         debug.log(`Load: min=${minTriangles} max=${maxTriangles} avg=${avgTriangles.toFixed(0)} (${(maxTriangles/avgTriangles).toFixed(2)}x imbalance, worst=${(workPerWorkgroup/1e6).toFixed(1)}M tests)`);
+        debug.log(`Estimated work/bucket: ${(estimatedWorkPerBucket/1e6).toFixed(1)}M tests`);
+        if (numBucketBatches > 1) {
+            debug.log(`Bucket batching: ${numBucketBatches} batches of ~${maxBucketsPerBatch} buckets to avoid timeout`);
+        }
     }
 
     // Reuse buffers if provided, otherwise create new ones
-    let triangleBuffer, bucketInfoBuffer, triangleIndicesBuffer;
+    let triangleBuffer, triangleIndicesBuffer;
     let shouldCleanupBuffers = false;
 
     if (reusableBuffers) {
-        // Reuse cached buffers from previous batch
+        // Reuse cached buffers from previous angle batch
         triangleBuffer = reusableBuffers.triangleBuffer;
-        bucketInfoBuffer = reusableBuffers.bucketInfoBuffer;
         triangleIndicesBuffer = reusableBuffers.triangleIndicesBuffer;
     } else {
         // Create new GPU buffers (first batch or non-batched operation)
@@ -1731,30 +1755,6 @@ async function radialRasterize({
         });
         new Float32Array(triangleBuffer.getMappedRange()).set(triangles);
         triangleBuffer.unmap();
-
-        // Create bucket info buffer (f32, f32, u32, u32 per bucket)
-        const bucketInfoSize = bucketData.buckets.length * 16; // 4 fields * 4 bytes
-        bucketInfoBuffer = device.createBuffer({
-            size: bucketInfoSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            mappedAtCreation: true
-        });
-
-        const bucketView = new ArrayBuffer(bucketInfoSize);
-        const bucketFloatView = new Float32Array(bucketView);
-        const bucketUintView = new Uint32Array(bucketView);
-
-        for (let i = 0; i < bucketData.buckets.length; i++) {
-            const bucket = bucketData.buckets[i];
-            const offset = i * 4;
-            bucketFloatView[offset] = bucket.minX;           // f32
-            bucketFloatView[offset + 1] = bucket.maxX;       // f32
-            bucketUintView[offset + 2] = bucket.startIndex;  // u32
-            bucketUintView[offset + 3] = bucket.count;       // u32
-        }
-
-        new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
-        bucketInfoBuffer.unmap();
 
         // Create triangle indices buffer
         triangleIndicesBuffer = device.createBuffer({
@@ -1779,67 +1779,109 @@ async function radialRasterize({
     device.queue.writeBuffer(outputBuffer, 0, initData);
     // Note: No need to wait - GPU will execute writeBuffer before compute shader
 
-    // Create uniforms with proper alignment (f32 and u32 mixed)
-    // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32, f32
-    const uniformBuffer = device.createBuffer({
-        size: 52,  // 13 fields * 4 bytes
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-
-    const uniformView = new ArrayBuffer(52);
-    const floatView = new Float32Array(uniformView);
-    const uintView = new Uint32Array(uniformView);
-
-    floatView[0] = resolution;                                          // f32
-    floatView[1] = angleStep * (Math.PI / 180);                         // f32
-    uintView[2] = numAngles;                                            // u32
-    floatView[3] = maxRadius;                                           // f32
-    floatView[4] = toolWidth;                                           // f32
-    uintView[5] = gridYHeight;                                          // u32
-    floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;  // f32 bucketWidth
-    uintView[7] = bucketGridWidth;                                      // u32
-    floatView[8] = bucketMinX;                                          // f32 global_min_x (use bucket range)
-    floatView[9] = zFloor;                                              // f32
-    uintView[10] = 0;                                                   // u32 filterMode
-    uintView[11] = bucketData.numBuckets;                               // u32
-    floatView[12] = startAngle * (Math.PI / 180);                       // f32 start_angle (radians)
-
-    new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
-    uniformBuffer.unmap();
-
-    // Use cached pipeline (created in initWebGPU)
-    const pipeline = cachedRadialBatchPipeline;
-
-    // Create bind group
-    const bindGroup = device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: triangleBuffer } },
-            { binding: 1, resource: { buffer: outputBuffer } },
-            { binding: 2, resource: { buffer: uniformBuffer } },
-            { binding: 3, resource: { buffer: bucketInfoBuffer } },
-            { binding: 4, resource: { buffer: triangleIndicesBuffer } }
-        ]
-    });
-
-    // Dispatch
-    const commandEncoder = device.createCommandEncoder();
-    const passEncoder = commandEncoder.beginComputePass();
-    passEncoder.setPipeline(pipeline);
-    passEncoder.setBindGroup(0, bindGroup);
-
     // Prep complete, GPU starting
     timings.prep = performance.now() - timings.start;
     const gpuStart = performance.now();
 
-    // Dispatch: (numAngles/8, gridYHeight/8, numBuckets)
+    // Use cached pipeline (created in initWebGPU)
+    const pipeline = cachedRadialBatchPipeline;
+
+    // Process buckets in batches to avoid GPU timeouts
+    const commandEncoder = device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+
     const dispatchX = Math.ceil(numAngles / 8);
     const dispatchY = Math.ceil(gridYHeight / 8);
-    const dispatchZ = bucketData.numBuckets;
-    debug.log(`Dispatch: (${dispatchX}, ${dispatchY}, ${dispatchZ}) = ${dispatchX * 8} angles, ${dispatchY * 8} Y cells, ${dispatchZ} buckets`);
 
-    passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+    // Collect buffers to destroy after GPU completes
+    const batchBuffersToDestroy = [];
+
+    for (let batchIdx = 0; batchIdx < numBucketBatches; batchIdx++) {
+        const startBucket = batchIdx * maxBucketsPerBatch;
+        const endBucket = Math.min(startBucket + maxBucketsPerBatch, bucketData.numBuckets);
+        const bucketsInBatch = endBucket - startBucket;
+
+        // Create bucket info buffer for this batch
+        const bucketInfoSize = bucketsInBatch * 16; // 4 fields * 4 bytes per bucket
+        const bucketInfoBuffer = device.createBuffer({
+            size: bucketInfoSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+
+        const bucketView = new ArrayBuffer(bucketInfoSize);
+        const bucketFloatView = new Float32Array(bucketView);
+        const bucketUintView = new Uint32Array(bucketView);
+
+        for (let i = 0; i < bucketsInBatch; i++) {
+            const bucket = bucketData.buckets[startBucket + i];
+            const offset = i * 4;
+            bucketFloatView[offset] = bucket.minX;           // f32
+            bucketFloatView[offset + 1] = bucket.maxX;       // f32
+            bucketUintView[offset + 2] = bucket.startIndex;  // u32
+            bucketUintView[offset + 3] = bucket.count;       // u32
+        }
+
+        new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
+        bucketInfoBuffer.unmap();
+
+        // Create uniforms for this batch
+        // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32, f32, u32
+        const uniformBuffer = device.createBuffer({
+            size: 56,  // 14 fields * 4 bytes
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+
+        const uniformView = new ArrayBuffer(56);
+        const floatView = new Float32Array(uniformView);
+        const uintView = new Uint32Array(uniformView);
+
+        floatView[0] = resolution;                                          // f32
+        floatView[1] = angleStep * (Math.PI / 180);                         // f32
+        uintView[2] = numAngles;                                            // u32
+        floatView[3] = maxRadius;                                           // f32
+        floatView[4] = toolWidth;                                           // f32
+        uintView[5] = gridYHeight;                                          // u32
+        floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;  // f32 bucketWidth
+        uintView[7] = bucketGridWidth;                                      // u32
+        floatView[8] = bucketMinX;                                          // f32 global_min_x
+        floatView[9] = zFloor;                                              // f32
+        uintView[10] = 0;                                                   // u32 filterMode
+        uintView[11] = bucketData.numBuckets;                               // u32 (total buckets, for validation)
+        floatView[12] = startAngle * (Math.PI / 180);                       // f32 start_angle (radians)
+        uintView[13] = startBucket;                                         // u32 bucket_offset
+
+        new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
+        uniformBuffer.unmap();
+
+        // Create bind group for this batch
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: triangleBuffer } },
+                { binding: 1, resource: { buffer: outputBuffer } },
+                { binding: 2, resource: { buffer: uniformBuffer } },
+                { binding: 3, resource: { buffer: bucketInfoBuffer } },
+                { binding: 4, resource: { buffer: triangleIndicesBuffer } }
+            ]
+        });
+
+        passEncoder.setBindGroup(0, bindGroup);
+
+        // Dispatch for this batch
+        const dispatchZ = bucketsInBatch;
+        if (diagnostic || numBucketBatches > 1) {
+            debug.log(`  Batch ${batchIdx + 1}/${numBucketBatches}: Dispatch (${dispatchX}, ${dispatchY}, ${dispatchZ}) = buckets ${startBucket}-${endBucket - 1}`);
+        }
+
+        passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+
+        // Save buffers to destroy after GPU completes
+        batchBuffersToDestroy.push(uniformBuffer, bucketInfoBuffer);
+    }
+
     passEncoder.end();
 
     // Read back
@@ -1859,10 +1901,13 @@ async function radialRasterize({
     const outputCopy = new Float32Array(stagingBuffer.getMappedRange().slice());
     stagingBuffer.unmap();
 
-    // Note: Don't cleanup triangle/bucket/indices buffers here if we'll return them for reuse
-    // (cleanup happens after determining if we need to return them)
+    // Now safe to destroy batch buffers (GPU has completed)
+    for (const buffer of batchBuffersToDestroy) {
+        buffer.destroy();
+    }
+
+    // Cleanup main buffers
     outputBuffer.destroy();
-    uniformBuffer.destroy();
     stagingBuffer.destroy();
 
     timings.gpu = performance.now() - gpuStart;
@@ -1927,21 +1972,20 @@ async function radialRasterize({
 
     const result = { strips, timings };
 
-    // Decide what to do with triangle/bucket/indices buffers
+    // Decide what to do with triangle/indices buffers
+    // Note: bucketInfoBuffer is now created/destroyed per bucket batch within the loop
     if (returnBuffersForReuse && shouldCleanupBuffers) {
         // First batch in multi-batch operation: return buffers for subsequent batches to reuse
         result.reusableBuffers = {
             triangleBuffer,
-            bucketInfoBuffer,
             triangleIndicesBuffer
         };
     } else if (shouldCleanupBuffers) {
         // Single batch operation OR we're NOT supposed to return buffers: destroy them now
         triangleBuffer.destroy();
-        bucketInfoBuffer.destroy();
         triangleIndicesBuffer.destroy();
     }
-    // else: we're reusing buffers from a previous batch, don't destroy them (caller will destroy after all batches)
+    // else: we're reusing buffers from a previous angle batch, don't destroy them (caller will destroy after all angle batches)
 
     return result;
 }
@@ -2222,8 +2266,8 @@ self.onmessage = async function(e) {
                 // Cleanup cached rasterization buffers after all batches complete
                 if (batchReuseBuffers) {
                     batchReuseBuffers.triangleBuffer.destroy();
-                    batchReuseBuffers.bucketInfoBuffer.destroy();
                     batchReuseBuffers.triangleIndicesBuffer.destroy();
+                    // Note: bucketInfoBuffer is no longer in reusableBuffers (created/destroyed per bucket batch)
                     debug.log(`Destroyed cached GPU buffers after all batches`);
                 }
 
