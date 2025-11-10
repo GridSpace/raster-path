@@ -517,7 +517,7 @@ async function initRasterPath() {
         mode: mode,
         resolution: resolution,
         rotationStep: mode === 'radial' ? angleStep : undefined,
-        batchDivisor: 1,
+        batchDivisor: 5,
         debug: true
     });
 

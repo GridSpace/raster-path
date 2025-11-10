@@ -1719,7 +1719,7 @@ async function radialRasterize({
         maxBucketsPerBatch = bucketData.numBuckets; // Empty model
     } else {
         const idealBucketsPerBatch = Math.floor(maxWorkPerBatch / estimatedWorkPerBucket);
-        const minBucketsPerBatch = Math.min(3, bucketData.numBuckets);
+        const minBucketsPerBatch = Math.min(4, bucketData.numBuckets);
         maxBucketsPerBatch = Math.max(minBucketsPerBatch, idealBucketsPerBatch);
         // Cap at total buckets
         maxBucketsPerBatch = Math.min(maxBucketsPerBatch, bucketData.numBuckets);
@@ -1796,6 +1796,7 @@ async function radialRasterize({
 
     // Collect buffers to destroy after GPU completes
     const batchBuffersToDestroy = [];
+    debug.log(`Dispatch (${dispatchX}, ${dispatchY}, ${maxBucketsPerBatch}) in ${numBucketBatches} Chunks`);
 
     for (let batchIdx = 0; batchIdx < numBucketBatches; batchIdx++) {
         const startBucket = batchIdx * maxBucketsPerBatch;
@@ -1872,7 +1873,7 @@ async function radialRasterize({
 
         // Dispatch for this batch
         const dispatchZ = bucketsInBatch;
-        if (diagnostic || numBucketBatches > 1) {
+        if (diagnostic) {
             debug.log(`  Batch ${batchIdx + 1}/${numBucketBatches}: Dispatch (${dispatchX}, ${dispatchY}, ${dispatchZ}) = buckets ${startBucket}-${endBucket - 1}`);
         }
 
@@ -1965,9 +1966,8 @@ async function radialRasterize({
 
     Object.assign(batchInfo, {
         'prep': (timings.prep | 0),
-        'gpu': (timings.gpu | 0),
-        'stitch': (timings.stitch | 0),
-        'raster': (totalTime | 0)
+        'raster': (timings.gpu | 0),
+        'stitch': (timings.stitch | 0)
     });
 
     const result = { strips, timings };
@@ -2183,12 +2183,9 @@ self.onmessage = async function(e) {
                         maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
                         maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
                     }
-                    const dimTime = performance.now() - dimStartTime;
 
                     // Create reusable buffers for this batch
-                    const bufferCreateStartTime = performance.now();
                     const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
-                    const bufferCreateTime = performance.now() - bufferCreateStartTime;
 
                     // Generate toolpaths for this batch
                     const toolpathStartTime = performance.now();
@@ -2254,7 +2251,6 @@ self.onmessage = async function(e) {
                     const batchTotalTime = performance.now() - batchStartTime;
 
                     Object.assign(batchInfo, {
-                        'mkbuf': (bufferCreateTime | 0),
                         'paths': (toolpathTime | 0),
                         'strips': allStripToolpaths.length,
                         'total': (batchTotalTime | 0)
