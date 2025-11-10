@@ -55,6 +55,7 @@
  * @property {number} resolution - Grid step size in mm (required)
  * @property {number} rotationStep - Radial mode only: degrees between rays (e.g., 1.0 = 360 rays)
  * @property {number} trianglesPerTile - Target triangles per tile for radial rasterization (default: calculated)
+ * @property {number} batchDivisor - Testing parameter to artificially divide batch size (default: 1)
  * @property {boolean} debug - Enable debug logging (default: false)
  * @property {boolean} quiet - Suppress log output (default: false)
  */
@@ -103,18 +104,13 @@ export class RasterPath {
         this.deviceCapabilities = null;
 
         // Configure debug output
-        let urlOpt = [];
         if (config.quiet) {
             debug.log = function() {};
-            urlOpt.push('quiet');
-        }
-        if (config.debug) {
-            urlOpt.push('debug');
         }
 
         // Configuration with defaults
         this.config = {
-            workerName: (config.workerName ?? "webgpu-worker.js") + (urlOpt.length ? "?"+urlOpt.join('&') : ""),
+            workerName: config.workerName ?? "webgpu-worker.js",
             maxGPUMemoryMB: config.maxGPUMemoryMB ?? 256,
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             autoTiling: config.autoTiling ?? true,
@@ -122,7 +118,12 @@ export class RasterPath {
             maxConcurrentTiles: config.maxConcurrentTiles ?? 10,
             trianglesPerTile: config.trianglesPerTile, // undefined = auto-calculate
             radialRotationOffset: config.radialRotationOffset ?? 0, // degrees
+            batchDivisor: config.batchDivisor ?? 1, // For testing batching overhead
+            debug: config.debug,
+            quiet: config.quiet
         };
+
+        debug.log('config', this.config);
     }
 
     /**
@@ -238,8 +239,8 @@ export class RasterPath {
             const originalBounds = boundsOverride || this.#calculateBounds(triangles);
 
             // Center model in YZ plane (required for radial rasterization)
-            // Radial mode casts rays from origin, so terrain must be centered at (0,0) in YZ
-            // to ensure rays intersect the geometry symmetrically around the rotation axis
+            // Radial mode casts rays from max_radius distance inward toward the X-axis,
+            // and centering ensures the geometry is symmetric around the rotation axis
             const centerY = (originalBounds.min.y + originalBounds.max.y) / 2;
             const centerZ = (originalBounds.min.z + originalBounds.max.z) / 2;
 
@@ -273,12 +274,10 @@ export class RasterPath {
      * @param {number} params.xStep - Sample every Nth point in X direction
      * @param {number} params.yStep - Sample every Nth point in Y direction
      * @param {number} params.zFloor - Z floor value for out-of-bounds areas
-     * @param {number} params.radiusOffset - (Radial mode only) Distance from terrain surface to tool tip in mm.
-     *                                        Used to calculate radial collision offset. Default: 20mm
      * @param {function} params.onProgress - Optional progress callback (progress: number, info?: string) => void
      * @returns {Promise<object>} Planar: {pathData, width, height} | Radial: {strips[], numStrips, totalPoints}
      */
-    async generateToolpaths({ xStep, yStep, zFloor, radiusOffset = 20, onProgress }) {
+    async generateToolpaths({ xStep, yStep, zFloor, onProgress }) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
@@ -286,6 +285,8 @@ export class RasterPath {
         if (!this.toolData) {
             throw new Error('Tool not loaded. Call loadTool() first.');
         }
+
+        debug.log('gen.paths', { xStep, yStep, zFloor });
 
         if (this.mode === 'planar') {
             if (!this.terrainData) {
@@ -444,8 +445,7 @@ export class RasterPath {
                     zFloor: zFloor,
                     bounds,
                     xStep,
-                    yStep,
-                    gridStep: this.resolution
+                    yStep
                 },
                 'radial-toolpaths-complete',
                 completionHandler

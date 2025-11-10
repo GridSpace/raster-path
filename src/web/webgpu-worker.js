@@ -48,27 +48,33 @@
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
+let config = {};
 let device = null;
+let deviceCapabilities = null;
 let isInitialized = false;
 let cachedRasterizePipeline = null;
 let cachedRasterizeShaderModule = null;
 let cachedToolpathPipeline = null;
 let cachedToolpathShaderModule = null;
-let config = null;
-let deviceCapabilities = null;
+let cachedRadialBatchPipeline = null;
+let cachedRadialBatchShaderModule = null;
+let lastlog;
 
 const EMPTY_CELL = -1e10;
-const log_pre = '[Raster Worker]';
-
-// url params to control logging
-let { search } = self.location;
-let verbose = search.indexOf('debug') >= 0;
-let quiet = search.indexOf('quiet') >= 0;
+const log_pre = '[Worker]';
+const diagnostic = false;
 
 const debug = {
     error: function() { console.error(log_pre, ...arguments) },
     warn: function() { console.warn(log_pre, ...arguments) },
-    log: function() { !quiet && console.log(log_pre, ...arguments) },
+    log: function() {
+        if (!config.quiet) {
+            let now = performance.now();
+            let since = ((now - (lastlog ?? now)) | 0).toString().padStart(4,' ');
+            console.log(log_pre, `[${since}]`, ...arguments);
+            lastlog = now;
+        }
+    },
     ok: function() { console.log(log_pre, '✅', ...arguments) },
 };
 
@@ -140,6 +146,15 @@ async function initWebGPU() {
             compute: { module: cachedToolpathShaderModule, entryPoint: 'main' },
         });
 
+        // Pre-compile radial batch shader module
+        cachedRadialBatchShaderModule = device.createShaderModule({ code: radialRasterizeShaderCode });
+
+        // Pre-create radial batch pipeline
+        cachedRadialBatchPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedRadialBatchShaderModule, entryPoint: 'main' },
+        });
+
         // Store device capabilities
         deviceCapabilities = {
             maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
@@ -158,13 +173,13 @@ async function initWebGPU() {
 }
 
 // Planar rasterization with spatial partitioning
-const rasterizeShaderCode = /*SHADER:planar-rasterize*/;
+const rasterizeShaderCode = 'SHADER:planar-rasterize';
 
 // Planar toolpath generation
-const toolpathShaderCode = /*SHADER:planar-toolpath*/;
+const toolpathShaderCode = 'SHADER:planar-toolpath';
 
-// Radial V2: Rasterization with rotating ray planes and X-bucketing
-const radialRasterizeV2ShaderCode = /*SHADER:radial-raster-v2*/;
+// Radial: Rasterization with rotating ray planes and X-bucketing
+const radialRasterizeShaderCode = 'SHADER:radial-raster';
 
 // Calculate bounding box from triangle vertices
 function calculateBounds(triangles) {
@@ -195,8 +210,6 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     const gridWidth = Math.max(1, Math.ceil((bounds.max.x - bounds.min.x) / cellSize));
     const gridHeight = Math.max(1, Math.ceil((bounds.max.y - bounds.min.y) / cellSize));
     const totalCells = gridWidth * gridHeight;
-
-    // debug.log(`Building spatial grid ${gridWidth}x${gridHeight} (${cellSize}mm cells)`);
 
     const grid = new Array(totalCells);
     for (let i = 0; i < totalCells; i++) {
@@ -254,7 +267,13 @@ function buildSpatialGrid(triangles, bounds, cellSize = 5.0) {
     cellOffsets[totalCells] = currentOffset;
 
     const avgPerCell = totalTriangleRefs / totalCells;
-    // debug.log(`Spatial grid: ${totalTriangleRefs} refs (avg ${avgPerCell.toFixed(1)} per cell)`);
+
+    // Calculate actual tool diameter from bounds for logging
+    const toolWidth = bounds.max.x - bounds.min.x;
+    const toolHeight = bounds.max.y - bounds.min.y;
+    const toolDiameter = Math.max(toolWidth, toolHeight);
+
+    debug.log(`Spatial grid: ${gridWidth}x${gridHeight} ${totalTriangleRefs} tri-refs ~${avgPerCell.toFixed(0)}/${cellSize}mm cell (tool: ${toolDiameter.toFixed(2)}mm)`);
 
     return {
         gridWidth,
@@ -283,7 +302,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         debug.log(`First-time init: ${(initEnd - initStart).toFixed(1)}ms`);
     }
 
-    // debug.log(`Rasterizing ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
+    // debug.log(`Raster ${triangles.length / 9} triangles (step ${stepSize}mm, mode ${filterMode})...`);
 
     // Extract options
     // boundsOverride: Optional manual bounds to avoid recalculating from triangles
@@ -314,14 +333,16 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
     const floatsPerPoint = filterMode === 0 ? 1 : 3;
     const outputSize = totalGridPoints * floatsPerPoint * 4;
     const maxBufferSize = device.limits.maxBufferSize || 268435456; // 256MB default
-    const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
+    // const modeStr = filterMode === 0 ? 'terrain (dense Z-only)' : 'tool (sparse XYZ)';
     // debug.log(`Output buffer size: ${(outputSize / 1024 / 1024).toFixed(2)} MB for ${modeStr} (max: ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB)`);
 
     if (outputSize > maxBufferSize) {
         throw new Error(`Output buffer too large: ${(outputSize / 1024 / 1024).toFixed(2)} MB exceeds device limit of ${(maxBufferSize / 1024 / 1024).toFixed(2)} MB. Try a larger step size.`);
     }
 
+    console.time(`${log_pre} Build Spatial Grid`);
     const spatialGrid = buildSpatialGrid(triangles, bounds);
+    console.timeEnd(`${log_pre} Build Spatial Grid`);
 
     // Create buffers
     const triangleBuffer = device.createBuffer({
@@ -462,7 +483,7 @@ async function rasterizeMeshSingle(triangles, stepSize, filterMode, options = {}
         result = new Float32Array(outputData);
         pointCount = totalGridPoints;
 
-        if (verbose) {
+        if (config.debug) {
             // Count valid points for logging (sentinel value = -1e10)
             let zeroCount = 0;
             let validCount = 0;
@@ -802,7 +823,6 @@ async function rasterizeMesh(triangles, stepSize, filterMode, options = {}) {
 
             const tileResult = await rasterizeMeshSingle(triangles, stepSize, filterMode, {
                 ...tiles[i].bounds,
-                rotationAngleDeg: options.rotationAngleDeg
             });
 
             const tileTime = performance.now() - tileStart;
@@ -1644,412 +1664,22 @@ function stitchToolpathTiles(tileResults, globalBounds, gridStep, xStep, yStep) 
     };
 }
 
-// Radial rasterization - two-pass tiled with bit-attention
-// Workload budget: triangles × scanlines should stay under this to avoid timeouts
-const MAX_WORKLOAD_PER_TILE = 10_000_000; // triangles × gridHeight budget per tile
-
-let cachedRadialCullPipeline = null;
-let cachedRadialRasterizePipeline = null;
-
-async function radialRasterize(triangles, stepSize, rotationStepDegrees, zFloor = 0, boundsOverride = null, params = {}) {
-    const startTime = performance.now();
-
-    if (!isInitialized) {
-        await initWebGPU();
-    }
-
-    // Check if SharedArrayBuffer is available and triangle data is large (>1M triangles = 9M floats = 36MB)
-    const numTriangles = triangles.length / 9;
-    const useSharedBuffer = typeof SharedArrayBuffer !== 'undefined' &&
-                           numTriangles > 1000000 &&
-                           !(triangles.buffer instanceof SharedArrayBuffer);
-
-    if (useSharedBuffer) {
-        debug.log(`Large dataset (${numTriangles.toLocaleString()} triangles), converting to SharedArrayBuffer`);
-        const sab = new SharedArrayBuffer(triangles.byteLength);
-        const sharedTriangles = new Float32Array(sab);
-        sharedTriangles.set(triangles);
-        triangles = sharedTriangles;
-    }
-
-    const bounds = boundsOverride || calculateBounds(triangles);
-
-    // Calculate max radius (distance from X-axis)
-    let maxRadius = 0;
-    for (let i = 0; i < triangles.length; i += 3) {
-        const y = triangles[i + 1];
-        const z = triangles[i + 2];
-        const radius = Math.sqrt(y * y + z * z);
-        maxRadius = Math.max(maxRadius, radius);
-    }
-
-    // Add margin for ray origins to start outside mesh
-    maxRadius *= 1.2;
-
-    const circumference = 2 * Math.PI * maxRadius;
-    const xRange = bounds.max.x - bounds.min.x;
-    const rotationStepRadians = rotationStepDegrees * (Math.PI / 180);
-
-    // Calculate grid height (number of angular scanlines)
-    const gridHeight = Math.ceil(360 / rotationStepDegrees) + 1;
-
-    // Calculate number of tiles based on user config or auto-calculation
-    let numTiles, trianglesPerTileTarget;
-
-    if (params.trianglesPerTile) {
-        // User specified explicit triangles per tile
-        trianglesPerTileTarget = params.trianglesPerTile;
-        numTiles = Math.max(1, Math.ceil(numTriangles / trianglesPerTileTarget));
-        debug.log(`Radial: ${numTriangles} triangles, ${gridHeight} scanlines, ${numTiles} X-tiles (${trianglesPerTileTarget} target tri/tile)`);
-    } else {
-        // Auto-calculate based on workload budget
-        // Total work = numTriangles × gridHeight × culling_efficiency
-        // More tiles = smaller X-slices = better culling = less work per tile
-        const totalWorkload = numTriangles * gridHeight * 0.5; // 0.5 = expected culling efficiency
-        numTiles = Math.max(1, Math.ceil(totalWorkload / MAX_WORKLOAD_PER_TILE));
-        trianglesPerTileTarget = Math.ceil(numTriangles / numTiles);
-        debug.log(`Radial: ${numTriangles} triangles, ${gridHeight} scanlines, ${numTiles} X-tiles (${trianglesPerTileTarget} avg tri/tile, auto-calculated)`);
-    }
-
-    const tileWidth = xRange / numTiles;
-
-    // Create pipelines on first use
-    if (!cachedRadialCullPipeline) {
-        const cullShaderModule = device.createShaderModule({ code: radialCullShaderCode });
-        cachedRadialCullPipeline = device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: cullShaderModule, entryPoint: 'main' }
-        });
-        debug.log('Created radial cull pipeline');
-    }
-
-    if (!cachedRadialRasterizePipeline) {
-        const rasterShaderModule = device.createShaderModule({ code: radialRasterizeShaderCode });
-        cachedRadialRasterizePipeline = device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: rasterShaderModule, entryPoint: 'main' }
-        });
-        debug.log('Created radial rasterize pipeline');
-    }
-
-    // Create shared triangle buffer
-    const triangleBuffer = device.createBuffer({
-        size: triangles.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(triangleBuffer, 0, triangles);
-
-    // Calculate attention bit array size
-    const numWords = Math.ceil(numTriangles / 32);
-    debug.log(`Attention array: ${numWords} words (${numWords * 4} bytes)`);
-
-    // Helper function to process a single tile
-    async function processTile(tileIdx) {
-        const prefix = `Tile ${tileIdx + 1}/${numTiles}:`;
-        try {
-            const tile_min_x = bounds.min.x + tileIdx * tileWidth;
-            const tile_max_x = bounds.min.x + (tileIdx + 1) * tileWidth;
-
-            debug.log(`${prefix} X=[${tile_min_x.toFixed(2)}, ${tile_max_x.toFixed(2)}]`);
-
-        // Pass 1: Cull triangles for this X-tile
-        const tileStartTime = performance.now();
-
-        const attentionBuffer = device.createBuffer({
-            size: numWords * 4,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-        });
-
-        // Clear attention buffer
-        const zeros = new Uint32Array(numWords);
-        device.queue.writeBuffer(attentionBuffer, 0, zeros);
-
-        const cullUniformData = new Float32Array(4);
-        cullUniformData[0] = tile_min_x;
-        cullUniformData[1] = tile_max_x;
-        const cullUniformU32 = new Uint32Array(cullUniformData.buffer);
-        cullUniformU32[2] = numTriangles;
-
-        const cullUniformBuffer = device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        device.queue.writeBuffer(cullUniformBuffer, 0, cullUniformData);
-
-        // CRITICAL: Wait for writeBuffer operations before compute dispatch
-        await device.queue.onSubmittedWorkDone();
-
-        const cullBindGroup = device.createBindGroup({
-            layout: cachedRadialCullPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: triangleBuffer } },
-                { binding: 1, resource: { buffer: attentionBuffer } },
-                { binding: 2, resource: { buffer: cullUniformBuffer } },
-            ],
-        });
-
-        const cullEncoder = device.createCommandEncoder();
-        const cullPass = cullEncoder.beginComputePass();
-        cullPass.setPipeline(cachedRadialCullPipeline);
-        cullPass.setBindGroup(0, cullBindGroup);
-        cullPass.dispatchWorkgroups(Math.ceil(numTriangles / 256));
-        cullPass.end();
-        device.queue.submit([cullEncoder.finish()]);
-        await device.queue.onSubmittedWorkDone();
-
-        const cullTime = performance.now() - tileStartTime;
-        // debug.log(`  Culling: ${cullTime.toFixed(1)}ms`);
-
-        // Pass 1.5: Read back attention bits and compact to triangle index list
-        const compactStartTime = performance.now();
-
-        // Create staging buffer to read attention bits
-        const attentionStagingBuffer = device.createBuffer({
-            size: numWords * 4,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        });
-
-        const copyEncoder = device.createCommandEncoder();
-        copyEncoder.copyBufferToBuffer(attentionBuffer, 0, attentionStagingBuffer, 0, numWords * 4);
-        device.queue.submit([copyEncoder.finish()]);
-        await device.queue.onSubmittedWorkDone();
-
-        await attentionStagingBuffer.mapAsync(GPUMapMode.READ);
-        const attentionBits = new Uint32Array(attentionStagingBuffer.getMappedRange());
-
-        // CPU compaction: build list of marked triangle indices
-        const compactIndices = [];
-        for (let triIdx = 0; triIdx < numTriangles; triIdx++) {
-            const wordIdx = Math.floor(triIdx / 32);
-            const bitIdx = triIdx % 32;
-            const isMarked = (attentionBits[wordIdx] & (1 << bitIdx)) !== 0;
-            if (isMarked) {
-                compactIndices.push(triIdx);
-            }
-        }
-
-        attentionStagingBuffer.unmap();
-        attentionStagingBuffer.destroy();
-
-        const compactTime = performance.now() - compactStartTime;
-        const cullingEfficiency = ((numTriangles - compactIndices.length) / numTriangles * 100).toFixed(1);
-        debug.log(`${prefix} Compacted ${numTriangles} → ${compactIndices.length} triangles (${cullingEfficiency}% culled) in ${compactTime.toFixed(1)}ms`);
-
-        // Create compact triangle index buffer
-        const compactIndexBuffer = device.createBuffer({
-            size: Math.max(4, compactIndices.length * 4), // At least 4 bytes
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
-        if (compactIndices.length > 0) {
-            device.queue.writeBuffer(compactIndexBuffer, 0, new Uint32Array(compactIndices));
-        }
-
-        // Pass 2: Rasterize this X-tile
-        const rasterStartTime = performance.now();
-
-        const gridWidth = Math.ceil(tileWidth / stepSize) + 1;
-        const gridHeight = Math.ceil(360 / rotationStepDegrees) + 1; // Number of angular samples
-        const totalCells = gridWidth * gridHeight;
-
-        debug.log(`${prefix} Grid: ${gridWidth}×${gridHeight} = ${totalCells} cells (rotationStep=${rotationStepDegrees}°)`);
-
-        const outputBuffer = device.createBuffer({
-            size: totalCells * 4,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-        });
-
-        // Initialize with EMPTY_CELL
-        const initData = new Float32Array(totalCells);
-        initData.fill(EMPTY_CELL);
-        device.queue.writeBuffer(outputBuffer, 0, initData);
-
-        const rotationOffsetRadians = (params.radialRotationOffset ?? 0) * (Math.PI / 180);
-
-        const rasterUniformData = new Float32Array(16);
-        rasterUniformData[0] = tile_min_x;
-        rasterUniformData[1] = tile_max_x;
-        rasterUniformData[2] = maxRadius;
-        rasterUniformData[3] = rotationStepRadians;
-        rasterUniformData[4] = stepSize;
-        rasterUniformData[5] = zFloor;
-        rasterUniformData[6] = rotationOffsetRadians;
-        rasterUniformData[7] = 0; // padding
-        const rasterUniformU32 = new Uint32Array(rasterUniformData.buffer);
-        rasterUniformU32[8] = gridWidth;
-        rasterUniformU32[9] = gridHeight;
-        rasterUniformU32[10] = compactIndices.length; // Use compact count instead of numTriangles
-        rasterUniformU32[11] = 0; // No longer using attention words
-
-        const rasterUniformBuffer = device.createBuffer({
-            size: 64,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        device.queue.writeBuffer(rasterUniformBuffer, 0, rasterUniformData);
-
-        // CRITICAL: Wait for writeBuffer operations before compute dispatch
-        await device.queue.onSubmittedWorkDone();
-
-        const rasterBindGroup = device.createBindGroup({
-            layout: cachedRadialRasterizePipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: triangleBuffer } },
-                { binding: 1, resource: { buffer: compactIndexBuffer } }, // Use compact indices instead of attention bits
-                { binding: 2, resource: { buffer: outputBuffer } },
-                { binding: 3, resource: { buffer: rasterUniformBuffer } },
-            ],
-        });
-
-        const rasterEncoder = device.createCommandEncoder();
-        const rasterPass = rasterEncoder.beginComputePass();
-        rasterPass.setPipeline(cachedRadialRasterizePipeline);
-        rasterPass.setBindGroup(0, rasterBindGroup);
-        const workgroupsX = Math.ceil(gridWidth / 16);
-        const workgroupsY = Math.ceil(gridHeight / 16);
-        rasterPass.dispatchWorkgroups(workgroupsX, workgroupsY);
-        rasterPass.end();
-
-        const stagingBuffer = device.createBuffer({
-            size: totalCells * 4,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        });
-
-        rasterEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, totalCells * 4);
-        device.queue.submit([rasterEncoder.finish()]);
-        await device.queue.onSubmittedWorkDone();
-
-        await stagingBuffer.mapAsync(GPUMapMode.READ);
-        const outputData = new Float32Array(stagingBuffer.getMappedRange());
-        const tileResult = new Float32Array(outputData);
-        stagingBuffer.unmap();
-
-        const rasterTime = performance.now() - rasterStartTime;
-        debug.log(`${prefix} Rasterization: ${rasterTime.toFixed(1)}ms`);
-
-        // Cleanup tile buffers
-        attentionBuffer.destroy();
-        cullUniformBuffer.destroy();
-        compactIndexBuffer.destroy();
-        outputBuffer.destroy();
-        rasterUniformBuffer.destroy();
-        stagingBuffer.destroy();
-
-            return {
-                tileIdx,
-                data: tileResult,
-                gridWidth,
-                gridHeight,
-                minX: tile_min_x,
-                maxX: tile_max_x
-            };
-        } catch (error) {
-            debug.error(`Error processing tile ${tileIdx + 1}/${numTiles}:`, error);
-            throw new Error(`Tile ${tileIdx + 1} failed: ${error.message}`);
-        }
-    }
-
-    // Process tiles with rolling window to maintain constant concurrency
-    // This keeps GPU busy while preventing browser from allocating too many buffers at once
-    const maxConcurrentTiles = params.maxConcurrentTiles ?? 50;
-    debug.log(`Processing ${numTiles} tiles (max ${maxConcurrentTiles} concurrent)...`);
-
-    let completedTiles = 0;
-    let nextTileIdx = 0;
-    const activeTiles = new Map(); // promise -> tileIdx
-    const tileResults = new Array(numTiles);
-
-    // Helper to start a tile and track it
-    const startTile = (tileIdx) => {
-        const promise = processTile(tileIdx).then(result => {
-            completedTiles++;
-            const percent = Math.round((completedTiles / numTiles) * 100);
-
-            // Report progress
-            self.postMessage({
-                type: 'rasterize-progress',
-                data: {
-                    percent,
-                    current: completedTiles,
-                    total: numTiles
-                }
-            });
-
-            tileResults[tileIdx] = result;
-            activeTiles.delete(promise);
-            return result;
-        });
-        activeTiles.set(promise, tileIdx);
-        return promise;
-    };
-
-    // Start initial window of tiles
-    while (nextTileIdx < numTiles && activeTiles.size < maxConcurrentTiles) {
-        startTile(nextTileIdx++);
-    }
-
-    // As tiles complete, start new ones to maintain window size
-    while (activeTiles.size > 0) {
-        // Wait for at least one tile to complete
-        await Promise.race(activeTiles.keys());
-
-        // Start as many new tiles as needed to fill window
-        while (nextTileIdx < numTiles && activeTiles.size < maxConcurrentTiles) {
-            startTile(nextTileIdx++);
-        }
-    }
-
-    triangleBuffer.destroy();
-
-    const totalTime = performance.now() - startTime;
-    debug.log(`Radial complete in ${totalTime.toFixed(1)}ms`);
-
-    // Stitch tiles together into a single dense array
-    const fullGridHeight = Math.ceil(360 / rotationStepDegrees) + 1; // Number of angular samples
-    const fullGridWidth = Math.ceil(xRange / stepSize) + 1;
-    const stitchedData = new Float32Array(fullGridWidth * fullGridHeight);
-    stitchedData.fill(EMPTY_CELL);
-
-    for (const tile of tileResults) {
-        const tileXOffset = Math.round((tile.minX - bounds.min.x) / stepSize);
-
-        for (let ty = 0; ty < tile.gridHeight; ty++) {
-            for (let tx = 0; tx < tile.gridWidth; tx++) {
-                const tileIdx = ty * tile.gridWidth + tx;
-                const fullX = tileXOffset + tx;
-                const fullY = ty;
-
-                if (fullX >= 0 && fullX < fullGridWidth && fullY >= 0 && fullY < fullGridHeight) {
-                    const fullIdx = fullY * fullGridWidth + fullX;
-                    stitchedData[fullIdx] = tile.data[tileIdx];
-                }
-            }
-        }
-    }
-
-    // For toolpath generation, bounds.max.y must match the actual grid dimensions
-    // so that createHeightMapFromPoints calculates the correct height:
-    // height = ceil((max.y - min.y) / stepSize) + 1 = gridHeight
-    // Therefore: max.y = (gridHeight - 1) * stepSize
-    const boundsMaxY = (fullGridHeight - 1) * stepSize;
-
-    return {
-        positions: stitchedData,
-        pointCount: stitchedData.length,
-        bounds: {
-            min: { x: bounds.min.x, y: 0, z: 0 },
-            max: { x: bounds.max.x, y: boundsMaxY, z: maxRadius }
-        },
-        conversionTime: totalTime,
-        gridWidth: fullGridWidth,
-        gridHeight: fullGridHeight,
-        isDense: true,
-        maxRadius,
-        circumference,
-        rotationStepDegrees  // NEW: needed for wrapping and toolpath generation
-    };
-}
-
-// Radial V2: Rasterize model with rotating ray planes and X-bucketing
-async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, numAngles, maxRadius, toolWidth, zFloor, bounds, startAngle = 0) {
+// Radial: Rasterize model with rotating ray planes and X-bucketing
+async function radialRasterize({
+    triangles,
+    bucketData,
+    resolution,
+    angleStep,
+    numAngles,
+    maxRadius,
+    toolWidth,
+    zFloor,
+    bounds,
+    startAngle = 0,
+    reusableBuffers = null,
+    returnBuffersForReuse = false,
+    batchInfo = {}
+}) {
     if (!device) {
         throw new Error('WebGPU not initialized');
     }
@@ -2076,50 +1706,65 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     const avgTriangles = bucketTriangleCounts.reduce((a, b) => a + b, 0) / bucketTriangleCounts.length;
     const workPerWorkgroup = maxTriangles * numAngles * bucketGridWidth * gridYHeight;
 
-    debug.log(`[Worker] Radial V2: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
-    debug.log(`[Worker] Load: min=${minTriangles} max=${maxTriangles} avg=${avgTriangles.toFixed(0)} (${(maxTriangles/avgTriangles).toFixed(2)}x imbalance, worst=${(workPerWorkgroup/1e6).toFixed(1)}M tests)`);
+    // Determine bucket batching to avoid GPU timeouts
+    // Target: keep max work per batch under ~1M ray-triangle tests
+    const maxWorkPerBatch = 1e6;
+    const estimatedWorkPerBucket = avgTriangles * numAngles * bucketGridWidth * gridYHeight;
 
-    // Create GPU buffers
-    const triangleBuffer = device.createBuffer({
-        size: triangles.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-    new Float32Array(triangleBuffer.getMappedRange()).set(triangles);
-    triangleBuffer.unmap();
-
-    // Create bucket info buffer (f32, f32, u32, u32 per bucket)
-    const bucketInfoSize = bucketData.buckets.length * 16; // 4 fields * 4 bytes
-    const bucketInfoBuffer = device.createBuffer({
-        size: bucketInfoSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-
-    const bucketView = new ArrayBuffer(bucketInfoSize);
-    const bucketFloatView = new Float32Array(bucketView);
-    const bucketUintView = new Uint32Array(bucketView);
-
-    for (let i = 0; i < bucketData.buckets.length; i++) {
-        const bucket = bucketData.buckets[i];
-        const offset = i * 4;
-        bucketFloatView[offset] = bucket.minX;           // f32
-        bucketFloatView[offset + 1] = bucket.maxX;       // f32
-        bucketUintView[offset + 2] = bucket.startIndex;  // u32
-        bucketUintView[offset + 3] = bucket.count;       // u32
+    // Calculate buckets per batch, but enforce reasonable limits
+    // - Minimum: 10 buckets per batch (unless total < 10)
+    // - Maximum: all buckets if work is reasonable
+    let maxBucketsPerBatch;
+    if (estimatedWorkPerBucket === 0) {
+        maxBucketsPerBatch = bucketData.numBuckets; // Empty model
+    } else {
+        const idealBucketsPerBatch = Math.floor(maxWorkPerBatch / estimatedWorkPerBucket);
+        const minBucketsPerBatch = Math.min(4, bucketData.numBuckets);
+        maxBucketsPerBatch = Math.max(minBucketsPerBatch, idealBucketsPerBatch);
+        // Cap at total buckets
+        maxBucketsPerBatch = Math.min(maxBucketsPerBatch, bucketData.numBuckets);
     }
 
-    new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
-    bucketInfoBuffer.unmap();
+    const numBucketBatches = Math.ceil(bucketData.numBuckets / maxBucketsPerBatch);
 
-    // Create triangle indices buffer
-    const triangleIndicesBuffer = device.createBuffer({
-        size: bucketData.triangleIndices.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-    new Uint32Array(triangleIndicesBuffer.getMappedRange()).set(bucketData.triangleIndices);
-    triangleIndicesBuffer.unmap();
+    if (diagnostic) {
+        debug.log(`Radial: ${gridWidth}x${gridYHeight} grid, ${numAngles} angles, ${bucketData.buckets.length} buckets`);
+        debug.log(`Load: min=${minTriangles} max=${maxTriangles} avg=${avgTriangles.toFixed(0)} (${(maxTriangles/avgTriangles).toFixed(2)}x imbalance, worst=${(workPerWorkgroup/1e6).toFixed(1)}M tests)`);
+        debug.log(`Estimated work/bucket: ${(estimatedWorkPerBucket/1e6).toFixed(1)}M tests`);
+        if (numBucketBatches > 1) {
+            debug.log(`Bucket batching: ${numBucketBatches} batches of ~${maxBucketsPerBatch} buckets to avoid timeout`);
+        }
+    }
+
+    // Reuse buffers if provided, otherwise create new ones
+    let triangleBuffer, triangleIndicesBuffer;
+    let shouldCleanupBuffers = false;
+
+    if (reusableBuffers) {
+        // Reuse cached buffers from previous angle batch
+        triangleBuffer = reusableBuffers.triangleBuffer;
+        triangleIndicesBuffer = reusableBuffers.triangleIndicesBuffer;
+    } else {
+        // Create new GPU buffers (first batch or non-batched operation)
+        shouldCleanupBuffers = true;
+
+        triangleBuffer = device.createBuffer({
+            size: triangles.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+        new Float32Array(triangleBuffer.getMappedRange()).set(triangles);
+        triangleBuffer.unmap();
+
+        // Create triangle indices buffer
+        triangleIndicesBuffer = device.createBuffer({
+            size: bucketData.triangleIndices.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+        new Uint32Array(triangleIndicesBuffer.getMappedRange()).set(bucketData.triangleIndices);
+        triangleIndicesBuffer.unmap();
+    }
 
     // Create output buffer (all angles, all buckets)
     const outputSize = numAngles * bucketData.numBuckets * bucketGridWidth * gridYHeight * 4;
@@ -2129,84 +1774,115 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     });
 
     // CRITICAL: Initialize output buffer with zFloor to avoid reading garbage data
-    // Use mappedAtCreation for deterministic initialization (not writeBuffer!)
-    const initEncoder = device.createCommandEncoder();
     const initData = new Float32Array(outputSize / 4);
     initData.fill(zFloor);
     device.queue.writeBuffer(outputBuffer, 0, initData);
-    // Force initialization to complete
-    device.queue.submit([initEncoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-
-    // Create uniforms with proper alignment (f32 and u32 mixed)
-    // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32, f32
-    const uniformBuffer = device.createBuffer({
-        size: 52,  // 13 fields * 4 bytes
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-
-    const uniformView = new ArrayBuffer(52);
-    const floatView = new Float32Array(uniformView);
-    const uintView = new Uint32Array(uniformView);
-
-    floatView[0] = resolution;                                          // f32
-    floatView[1] = angleStep * (Math.PI / 180);                        // f32
-    uintView[2] = numAngles;                                            // u32
-    floatView[3] = maxRadius;                                           // f32
-    floatView[4] = toolWidth;                                           // f32
-    uintView[5] = gridYHeight;                                          // u32
-    floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;  // f32 bucketWidth
-    uintView[7] = bucketGridWidth;                                      // u32
-    floatView[8] = bucketMinX;                                          // f32 global_min_x (use bucket range)
-    floatView[9] = zFloor;                                              // f32
-    uintView[10] = 0;                                                   // u32 filterMode
-    uintView[11] = bucketData.numBuckets;                               // u32
-    floatView[12] = startAngle * (Math.PI / 180);                       // f32 start_angle (radians)
-
-    new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
-    uniformBuffer.unmap();
-
-    // Create shader and pipeline
-    const shaderModule = device.createShaderModule({ code: radialRasterizeV2ShaderCode });
-    const pipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: {
-            module: shaderModule,
-            entryPoint: 'main'
-        }
-    });
-
-    // Create bind group
-    const bindGroup = device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: triangleBuffer } },
-            { binding: 1, resource: { buffer: outputBuffer } },
-            { binding: 2, resource: { buffer: uniformBuffer } },
-            { binding: 3, resource: { buffer: bucketInfoBuffer } },
-            { binding: 4, resource: { buffer: triangleIndicesBuffer } }
-        ]
-    });
-
-    console.time('RADIAL COMPUTE');
-    // Dispatch
-    const commandEncoder = device.createCommandEncoder();
-    const passEncoder = commandEncoder.beginComputePass();
-    passEncoder.setPipeline(pipeline);
-    passEncoder.setBindGroup(0, bindGroup);
+    // Note: No need to wait - GPU will execute writeBuffer before compute shader
 
     // Prep complete, GPU starting
     timings.prep = performance.now() - timings.start;
     const gpuStart = performance.now();
 
-    // Dispatch: (numAngles/8, gridYHeight/8, numBuckets)
+    // Use cached pipeline (created in initWebGPU)
+    const pipeline = cachedRadialBatchPipeline;
+
+    // Process buckets in batches to avoid GPU timeouts
+    const commandEncoder = device.createCommandEncoder();
+    const passEncoder = commandEncoder.beginComputePass();
+    passEncoder.setPipeline(pipeline);
+
     const dispatchX = Math.ceil(numAngles / 8);
     const dispatchY = Math.ceil(gridYHeight / 8);
-    const dispatchZ = bucketData.numBuckets;
-    debug.log(`[Worker] Dispatch: (${dispatchX}, ${dispatchY}, ${dispatchZ}) = ${dispatchX * 8} angles, ${dispatchY * 8} Y cells, ${dispatchZ} buckets`);
 
-    passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+    // Collect buffers to destroy after GPU completes
+    const batchBuffersToDestroy = [];
+    debug.log(`Dispatch (${dispatchX}, ${dispatchY}, ${maxBucketsPerBatch}) in ${numBucketBatches} Chunks`);
+
+    for (let batchIdx = 0; batchIdx < numBucketBatches; batchIdx++) {
+        const startBucket = batchIdx * maxBucketsPerBatch;
+        const endBucket = Math.min(startBucket + maxBucketsPerBatch, bucketData.numBuckets);
+        const bucketsInBatch = endBucket - startBucket;
+
+        // Create bucket info buffer for this batch
+        const bucketInfoSize = bucketsInBatch * 16; // 4 fields * 4 bytes per bucket
+        const bucketInfoBuffer = device.createBuffer({
+            size: bucketInfoSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+
+        const bucketView = new ArrayBuffer(bucketInfoSize);
+        const bucketFloatView = new Float32Array(bucketView);
+        const bucketUintView = new Uint32Array(bucketView);
+
+        for (let i = 0; i < bucketsInBatch; i++) {
+            const bucket = bucketData.buckets[startBucket + i];
+            const offset = i * 4;
+            bucketFloatView[offset] = bucket.minX;           // f32
+            bucketFloatView[offset + 1] = bucket.maxX;       // f32
+            bucketUintView[offset + 2] = bucket.startIndex;  // u32
+            bucketUintView[offset + 3] = bucket.count;       // u32
+        }
+
+        new Uint8Array(bucketInfoBuffer.getMappedRange()).set(new Uint8Array(bucketView));
+        bucketInfoBuffer.unmap();
+
+        // Create uniforms for this batch
+        // Struct layout: f32, f32, u32, f32, f32, u32, f32, u32, f32, f32, u32, u32, f32, u32
+        const uniformBuffer = device.createBuffer({
+            size: 56,  // 14 fields * 4 bytes
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+
+        const uniformView = new ArrayBuffer(56);
+        const floatView = new Float32Array(uniformView);
+        const uintView = new Uint32Array(uniformView);
+
+        floatView[0] = resolution;                                          // f32
+        floatView[1] = angleStep * (Math.PI / 180);                         // f32
+        uintView[2] = numAngles;                                            // u32
+        floatView[3] = maxRadius;                                           // f32
+        floatView[4] = toolWidth;                                           // f32
+        uintView[5] = gridYHeight;                                          // u32
+        floatView[6] = bucketData.buckets[0].maxX - bucketData.buckets[0].minX;  // f32 bucketWidth
+        uintView[7] = bucketGridWidth;                                      // u32
+        floatView[8] = bucketMinX;                                          // f32 global_min_x
+        floatView[9] = zFloor;                                              // f32
+        uintView[10] = 0;                                                   // u32 filterMode
+        uintView[11] = bucketData.numBuckets;                               // u32 (total buckets, for validation)
+        floatView[12] = startAngle * (Math.PI / 180);                       // f32 start_angle (radians)
+        uintView[13] = startBucket;                                         // u32 bucket_offset
+
+        new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
+        uniformBuffer.unmap();
+
+        // Create bind group for this batch
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: triangleBuffer } },
+                { binding: 1, resource: { buffer: outputBuffer } },
+                { binding: 2, resource: { buffer: uniformBuffer } },
+                { binding: 3, resource: { buffer: bucketInfoBuffer } },
+                { binding: 4, resource: { buffer: triangleIndicesBuffer } }
+            ]
+        });
+
+        passEncoder.setBindGroup(0, bindGroup);
+
+        // Dispatch for this batch
+        const dispatchZ = bucketsInBatch;
+        if (diagnostic) {
+            debug.log(`  Batch ${batchIdx + 1}/${numBucketBatches}: Dispatch (${dispatchX}, ${dispatchY}, ${dispatchZ}) = buckets ${startBucket}-${endBucket - 1}`);
+        }
+
+        passEncoder.dispatchWorkgroups(dispatchX, dispatchY, dispatchZ);
+
+        // Save buffers to destroy after GPU completes
+        batchBuffersToDestroy.push(uniformBuffer, bucketInfoBuffer);
+    }
+
     passEncoder.end();
 
     // Read back
@@ -2218,21 +1894,21 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputSize);
     device.queue.submit([commandEncoder.finish()]);
 
-    // CRITICAL: Wait for GPU to finish before reading results
+    // Wait for GPU to finish before reading results
     await device.queue.onSubmittedWorkDone();
-    console.timeEnd('RADIAL COMPUTE');
-
     await stagingBuffer.mapAsync(GPUMapMode.READ);
-    const outputData = new Float32Array(stagingBuffer.getMappedRange());
-    const outputCopy = new Float32Array(outputData);
+    // const outputData = new Float32Array(stagingBuffer.getMappedRange());
+    // const outputCopy = new Float32Array(outputData);
+    const outputCopy = new Float32Array(stagingBuffer.getMappedRange().slice());
     stagingBuffer.unmap();
 
-    // Cleanup
-    triangleBuffer.destroy();
-    bucketInfoBuffer.destroy();
-    triangleIndicesBuffer.destroy();
+    // Now safe to destroy batch buffers (GPU has completed)
+    for (const buffer of batchBuffersToDestroy) {
+        buffer.destroy();
+    }
+
+    // Cleanup main buffers
     outputBuffer.destroy();
-    uniformBuffer.destroy();
     stagingBuffer.destroy();
 
     timings.gpu = performance.now() - gpuStart;
@@ -2288,12 +1964,256 @@ async function radialRasterizeV2(triangles, bucketData, resolution, angleStep, n
     timings.stitch = performance.now() - stitchStart;
     const totalTime = performance.now() - timings.start;
 
-    debug.log(`[Worker] Radial V2 complete: ${totalTime.toFixed(0)}ms`);
-    debug.log(`[Worker]   Prep: ${timings.prep.toFixed(0)}ms (${(timings.prep/totalTime*100).toFixed(0)}%)`);
-    debug.log(`[Worker]   GPU:  ${timings.gpu.toFixed(0)}ms (${(timings.gpu/totalTime*100).toFixed(0)}%)`);
-    debug.log(`[Worker]   Stitch: ${timings.stitch.toFixed(0)}ms (${(timings.stitch/totalTime*100).toFixed(0)}%)`);
+    Object.assign(batchInfo, {
+        'prep': (timings.prep | 0),
+        'raster': (timings.gpu | 0),
+        'stitch': (timings.stitch | 0)
+    });
 
-    return { strips, timings };
+    const result = { strips, timings };
+
+    // Decide what to do with triangle/indices buffers
+    // Note: bucketInfoBuffer is now created/destroyed per bucket batch within the loop
+    if (returnBuffersForReuse && shouldCleanupBuffers) {
+        // First batch in multi-batch operation: return buffers for subsequent batches to reuse
+        result.reusableBuffers = {
+            triangleBuffer,
+            triangleIndicesBuffer
+        };
+    } else if (shouldCleanupBuffers) {
+        // Single batch operation OR we're NOT supposed to return buffers: destroy them now
+        triangleBuffer.destroy();
+        triangleIndicesBuffer.destroy();
+    }
+    // else: we're reusing buffers from a previous angle batch, don't destroy them (caller will destroy after all angle batches)
+
+    return result;
+}
+
+// Radial: Complete pipeline - rasterize model + generate toolpaths for all strips
+async function generateRadialToolpaths({
+    triangles,
+    bucketData,
+    toolData,
+    resolution,
+    angleStep,
+    numAngles,
+    maxRadius,
+    toolWidth,
+    zFloor,
+    bounds,
+    xStep,
+    yStep
+}) {
+    debug.log('radial-generate-toolpaths', { triangles: triangles.length, numAngles, resolution });
+
+    // Batch processing: rasterize angle ranges to avoid memory allocation failure
+    // Calculate safe batch size based on available GPU memory
+    const MAX_BUFFER_SIZE_MB = 1800; // Stay under 2GB WebGPU limit with headroom
+    const bytesPerCell = 4; // f32
+
+    const xSize = bounds.max.x - bounds.min.x;
+    const ySize = bounds.max.y - bounds.min.y;
+    const gridXSize = Math.ceil(xSize / resolution);
+    const gridYHeight = Math.ceil(ySize / resolution);
+
+    // Calculate total memory requirement
+    const cellsPerAngle = gridXSize * gridYHeight;
+    const bytesPerAngle = cellsPerAngle * bytesPerCell;
+    const totalMemoryMB = (numAngles * bytesPerAngle) / (1024 * 1024);
+
+    // Only batch if total memory exceeds threshold
+    const batchDivisor = config?.batchDivisor || 1;
+    let ANGLES_PER_BATCH, numBatches;
+    if (totalMemoryMB > MAX_BUFFER_SIZE_MB) {
+        // Need to batch
+        const maxAnglesPerBatch = Math.floor((MAX_BUFFER_SIZE_MB * 1024 * 1024) / bytesPerAngle);
+        // Apply batch divisor for overhead testing
+        const adjustedMaxAngles = Math.floor(maxAnglesPerBatch / batchDivisor);
+
+        ANGLES_PER_BATCH = Math.max(1, Math.min(adjustedMaxAngles, numAngles));
+        numBatches = Math.ceil(numAngles / ANGLES_PER_BATCH);
+        const batchSizeMB = (ANGLES_PER_BATCH * bytesPerAngle / 1024 / 1024).toFixed(1);
+        debug.log(`Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
+        debug.log(`Total memory: ${totalMemoryMB.toFixed(1)}MB exceeds limit, batching required`);
+        if (batchDivisor > 1) {
+            debug.log(`batchDivisor: ${batchDivisor}x (testing overhead: ${maxAnglesPerBatch} → ${adjustedMaxAngles} angles/batch)`);
+        }
+        debug.log(`Batch size: ${ANGLES_PER_BATCH} angles (~${batchSizeMB}MB per batch)`);
+        debug.log(`Processing ${numAngles} angles in ${numBatches} batch(es)`);
+    } else {
+        // Process all angles at once (but still respect batchDivisor for testing)
+        if (batchDivisor > 1) {
+            ANGLES_PER_BATCH = Math.max(10, Math.floor(numAngles / batchDivisor));
+            numBatches = Math.ceil(numAngles / ANGLES_PER_BATCH);
+            debug.log(`Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
+            debug.log(`Total memory: ${totalMemoryMB.toFixed(1)}MB (fits in buffer normally)`);
+            debug.log(`batchDivisor: ${batchDivisor}x (artificially creating ${numBatches} batches for overhead testing)`);
+        } else {
+            ANGLES_PER_BATCH = numAngles;
+            numBatches = 1;
+            debug.log(`Grid: ${gridXSize} x ${gridYHeight}, ${cellsPerAngle.toLocaleString()} cells/angle`);
+            debug.log(`Total memory: ${totalMemoryMB.toFixed(1)}MB fits in buffer, processing all ${numAngles} angles in single batch`);
+        }
+    }
+
+    const allStripToolpaths = [];
+    let totalToolpathPoints = 0;
+    const pipelineStartTime = performance.now();
+
+    // Prepare sparse tool once
+    const sparseToolData = createSparseToolFromPoints(toolData.positions);
+    debug.log(`Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
+
+    // Create reusable rasterization buffers if batching (numBatches > 1)
+    // These buffers (triangles, buckets, indices) don't change between batches
+    let batchReuseBuffers = null;
+    let batchTracking = [];
+
+    for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
+        const batchStartTime = performance.now();
+        const startAngleIdx = batchIdx * ANGLES_PER_BATCH;
+        const endAngleIdx = Math.min(startAngleIdx + ANGLES_PER_BATCH, numAngles);
+        const batchNumAngles = endAngleIdx - startAngleIdx;
+        const batchStartAngle = startAngleIdx * angleStep;
+
+        const batchInfo = {
+            from: startAngleIdx,
+            to: endAngleIdx
+        };
+        batchTracking.push(batchInfo);
+
+        debug.log(`Batch ${batchIdx + 1}/${numBatches}: angles ${startAngleIdx}-${endAngleIdx - 1} (${batchNumAngles} angles), startAngle=${batchStartAngle.toFixed(1)}°`);
+
+        // Rasterize this batch of strips
+        const rasterStartTime = performance.now();
+        const shouldReturnBuffers = (batchIdx === 0 && numBatches > 1);  // First batch of multi-batch operation
+        const batchModelResult = await radialRasterize({
+            triangles,
+            bucketData,
+            resolution,
+            angleStep,
+            numAngles: batchNumAngles,
+            maxRadius,
+            toolWidth,
+            zFloor,
+            bounds,
+            startAngle: batchStartAngle,
+            reusableBuffers: batchReuseBuffers,
+            returnBuffersForReuse: shouldReturnBuffers,
+            batchInfo
+        });
+
+        const rasterTime = performance.now() - rasterStartTime;
+
+        // Capture buffers from first batch for reuse
+        if (batchIdx === 0 && batchModelResult.reusableBuffers) {
+            batchReuseBuffers = batchModelResult.reusableBuffers;
+        }
+
+        // Find max dimensions for this batch
+        let maxStripWidth = 0;
+        let maxStripHeight = 0;
+        for (const strip of batchModelResult.strips) {
+            maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
+            maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
+        }
+
+        // Create reusable buffers for this batch
+        const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, xStep, maxStripHeight);
+
+        // Generate toolpaths for this batch
+        const toolpathStartTime = performance.now();
+
+        for (let i = 0; i < batchModelResult.strips.length; i++) {
+            const strip = batchModelResult.strips[i];
+            const globalStripIdx = startAngleIdx + i;
+
+            if (globalStripIdx % 10 === 0 || globalStripIdx === numAngles - 1) {
+                self.postMessage({
+                    type: 'toolpath-progress',
+                    data: {
+                        percent: Math.round(((globalStripIdx + 1) / numAngles) * 100),
+                        current: globalStripIdx + 1,
+                        total: numAngles,
+                        layer: globalStripIdx + 1
+                    }
+                });
+            }
+
+            if (!strip.positions || strip.positions.length === 0) continue;
+
+            // DEBUG: Diagnostic logging
+            if (diagnostic && (globalStripIdx === 0 || globalStripIdx === 360)) {
+                debug.log(`BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) INPUT terrain first 5 Z values: ${strip.positions.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
+            }
+
+            const stripToolpathResult = await runToolpathComputeWithBuffers(
+                strip.positions,
+                strip.gridWidth,
+                strip.gridHeight,
+                xStep,
+                strip.gridHeight,
+                zFloor,
+                reusableBuffers,
+                pipelineStartTime
+            );
+
+            // DEBUG: Verify toolpath generation output
+            if (diagnostic && (globalStripIdx === 0 || globalStripIdx === 360)) {
+                debug.log(`BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) OUTPUT toolpath first 5 Z values: ${stripToolpathResult.pathData.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
+            }
+
+            allStripToolpaths.push({
+                angle: strip.angle,
+                pathData: stripToolpathResult.pathData,
+                numScanlines: stripToolpathResult.numScanlines,
+                pointsPerLine: stripToolpathResult.pointsPerLine,
+                terrainBounds: strip.bounds
+            });
+
+            totalToolpathPoints += stripToolpathResult.pathData.length;
+        }
+        const toolpathTime = performance.now() - toolpathStartTime;
+
+        // Free batch terrain data
+        for (const strip of batchModelResult.strips) {
+            strip.positions = null;
+        }
+        destroyReusableToolpathBuffers(reusableBuffers);
+
+        const batchTotalTime = performance.now() - batchStartTime;
+
+        Object.assign(batchInfo, {
+            'prep': batchInfo.prep || 0,
+            'gpu': batchInfo.gpu || 0,
+            'stitch': batchInfo.stitch || 0,
+            'raster': batchInfo.raster || 0,
+            'mkbuf': 0,
+            'paths': (toolpathTime | 0),
+            'strips': allStripToolpaths.length,
+            'total': (batchTotalTime | 0)
+        });
+    }
+
+    console.table(batchTracking);
+
+    // Cleanup cached rasterization buffers after all batches complete
+    if (batchReuseBuffers) {
+        batchReuseBuffers.triangleBuffer.destroy();
+        batchReuseBuffers.triangleIndicesBuffer.destroy();
+        // Note: bucketInfoBuffer is no longer in reusableBuffers (created/destroyed per bucket batch)
+        debug.log(`Destroyed cached GPU buffers after all batches`);
+    }
+
+    const pipelineTotalTime = performance.now() - pipelineStartTime;
+    debug.log(`Complete radial toolpath: ${allStripToolpaths.length} strips, ${totalToolpathPoints} total points in ${pipelineTotalTime.toFixed(0)}ms`);
+
+    return {
+        strips: allStripToolpaths,
+        totalPoints: totalToolpathPoints,
+        numStrips: allStripToolpaths.length
+    };
 }
 
 // Handle messages from main thread
@@ -2309,7 +2229,8 @@ self.onmessage = async function(e) {
                     gpuMemorySafetyMargin: 0.8,
                     tileOverlapMM: 10,
                     autoTiling: true,
-                    minTileSize: 50
+                    minTileSize: 50,
+                    batchDivisor: 1  // For testing batching overhead: 1=optimal, 2=2x batches, 4=4x batches, etc.
                 };
                 const success = await initWebGPU();
                 self.postMessage({
@@ -2357,149 +2278,11 @@ self.onmessage = async function(e) {
                 break;
 
             case 'radial-generate-toolpaths':
-                // Complete radial pipeline: rasterize model + generate toolpaths for all strips
-                const {
-                    triangles: radialModelTriangles,
-                    bucketData: radialBucketData,
-                    toolData: radialToolData,
-                    resolution: radialResolution,
-                    angleStep: radialAngleStep,
-                    numAngles: radialNumAngles,
-                    maxRadius: radialMaxRadius,
-                    toolWidth: radialToolWidth,
-                    zFloor: radialToolpathZFloor,
-                    bounds: radialToolpathBounds,
-                    xStep: radialXStep,
-                    yStep: radialYStep,
-                    gridStep: radialGridStep
-                } = data;
-
-                debug.log('[Worker] Starting complete radial toolpath pipeline...');
-
-                // Batch processing: rasterize angle ranges to avoid memory allocation failure
-                const ANGLES_PER_BATCH = 360;  // Process 360 angles at a time
-                const numBatches = Math.ceil(radialNumAngles / ANGLES_PER_BATCH);
-
-                debug.log(`[Worker] Processing ${radialNumAngles} angles in ${numBatches} batch(es) of up to ${ANGLES_PER_BATCH} angles`);
-
-                const allStripToolpaths = [];
-                let totalToolpathPoints = 0;
-                const pipelineStartTime = performance.now();
-
-                // Prepare sparse tool once
-                const sparseToolData = createSparseToolFromPoints(radialToolData.positions);
-                debug.log(`[Worker] Created sparse tool: ${sparseToolData.count} points (reusing for all strips)`);
-
-                for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
-                    const startAngleIdx = batchIdx * ANGLES_PER_BATCH;
-                    const endAngleIdx = Math.min(startAngleIdx + ANGLES_PER_BATCH, radialNumAngles);
-                    const batchNumAngles = endAngleIdx - startAngleIdx;
-                    const batchStartAngle = startAngleIdx * radialAngleStep;
-
-                    debug.log(`[Worker] Batch ${batchIdx + 1}/${numBatches}: angles ${startAngleIdx}-${endAngleIdx - 1} (${batchNumAngles} angles), startAngle=${batchStartAngle.toFixed(1)}°`);
-
-                    // Rasterize this batch of strips
-                    const batchModelResult = await radialRasterizeV2(
-                        radialModelTriangles,
-                        radialBucketData,
-                        radialResolution,
-                        radialAngleStep,
-                        batchNumAngles,
-                        radialMaxRadius,
-                        radialToolWidth,
-                        radialToolpathZFloor,
-                        radialToolpathBounds,
-                        batchStartAngle  // Start angle for this batch
-                    );
-
-                    debug.log(`[Worker] Batch ${batchIdx + 1}: Rasterized ${batchModelResult.strips.length} strips, first angle=${batchModelResult.strips[0]?.angle.toFixed(1)}°, last angle=${batchModelResult.strips[batchModelResult.strips.length - 1]?.angle.toFixed(1)}°`);
-
-                    // Find max dimensions for this batch
-                    let maxStripWidth = 0;
-                    let maxStripHeight = 0;
-                    for (const strip of batchModelResult.strips) {
-                        maxStripWidth = Math.max(maxStripWidth, strip.gridWidth);
-                        maxStripHeight = Math.max(maxStripHeight, strip.gridHeight);
-                    }
-
-                    // Create reusable buffers for this batch
-                    const reusableBuffers = createReusableToolpathBuffers(maxStripWidth, maxStripHeight, sparseToolData, radialXStep, maxStripHeight);
-
-                    // Generate toolpaths for this batch
-                    debug.log(`[Worker] Batch ${batchIdx + 1}: Generating toolpaths for ${batchModelResult.strips.length} strips...`);
-                    for (let i = 0; i < batchModelResult.strips.length; i++) {
-                        const strip = batchModelResult.strips[i];
-                        const globalStripIdx = startAngleIdx + i;
-
-                        if (globalStripIdx % 10 === 0 || globalStripIdx === radialNumAngles - 1) {
-                            self.postMessage({
-                                type: 'toolpath-progress',
-                                data: {
-                                    percent: Math.round(((globalStripIdx + 1) / radialNumAngles) * 100),
-                                    current: globalStripIdx + 1,
-                                    total: radialNumAngles,
-                                    layer: globalStripIdx + 1
-                                }
-                            });
-                        }
-
-                        if (!strip.positions || strip.positions.length === 0) continue;
-
-                        // DEBUG: Diagnostic logging (BUILD_ID gets injected during build)
-                        // Used to trace data flow through radial toolpath pipeline
-                        if (globalStripIdx === 0 || globalStripIdx === 360) {
-                            debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) INPUT terrain first 5 Z values: ${strip.positions.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
-                        }
-
-                        const stripToolpathResult = await runToolpathComputeWithBuffers(
-                            strip.positions,
-                            strip.gridWidth,
-                            strip.gridHeight,
-                            radialXStep,
-                            strip.gridHeight,
-                            radialToolpathZFloor,
-                            reusableBuffers,
-                            pipelineStartTime
-                        );
-
-                        // DEBUG: Verify toolpath generation output
-                        if (globalStripIdx === 0 || globalStripIdx === 360) {
-                            debug.log(`[Worker] BUILD_ID_PLACEHOLDER | Strip ${globalStripIdx} (${strip.angle.toFixed(1)}°) OUTPUT toolpath first 5 Z values: ${stripToolpathResult.pathData.slice(0, 5).map(v => v.toFixed(3)).join(',')}`);
-                        }
-
-                        allStripToolpaths.push({
-                            angle: strip.angle,
-                            pathData: stripToolpathResult.pathData,
-                            numScanlines: stripToolpathResult.numScanlines,
-                            pointsPerLine: stripToolpathResult.pointsPerLine,
-                            terrainBounds: strip.bounds  // Include terrain bounds for display
-                        });
-
-                        totalToolpathPoints += stripToolpathResult.pathData.length;
-                    }
-
-                    destroyReusableToolpathBuffers(reusableBuffers);
-
-                    debug.log(`[Worker] Batch ${batchIdx + 1}: Completed, allStripToolpaths now has ${allStripToolpaths.length} strips total`);
-
-                    // Free batch terrain data
-                    for (const strip of batchModelResult.strips) {
-                        strip.positions = null;
-                    }
-                }
-
-                const pipelineTotalTime = performance.now() - pipelineStartTime;
-                debug.log(`[Worker] Complete radial toolpath: ${allStripToolpaths.length} strips, ${totalToolpathPoints} total points in ${pipelineTotalTime.toFixed(0)}ms`);
-
-                const toolpathTransferBuffers = allStripToolpaths.map(strip => strip.pathData.buffer);
-
+                const radialToolpathResult = await generateRadialToolpaths(data);
+                const toolpathTransferBuffers = radialToolpathResult.strips.map(strip => strip.pathData.buffer);
                 self.postMessage({
                     type: 'radial-toolpaths-complete',
-                    data: {
-                        strips: allStripToolpaths,
-                        totalPoints: totalToolpathPoints,
-                        numStrips: allStripToolpaths.length
-                    }
+                    data: radialToolpathResult
                 }, toolpathTransferBuffers);
                 break;
 

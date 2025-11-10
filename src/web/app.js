@@ -12,12 +12,16 @@ let zFloor = -100;
 let xStep = 5;
 let yStep = 5;
 let angleStep = 1.0; // degrees
+let toolSize = 2.5; // mm - target tool diameter
 
-let modelSTL = null;  // ArrayBuffer
+let modelSTL = null;  // ArrayBuffer (current, possibly rotated)
+let modelOriginalSTL = null;  // ArrayBuffer (original, for reset)
 let toolSTL = null;   // ArrayBuffer
+let toolOriginalSTL = null;  // ArrayBuffer (original, for reset/scaling)
 
 let modelTriangles = null;  // Float32Array
 let toolTriangles = null;   // Float32Array
+let toolOriginalTriangles = null;  // Float32Array (original, unscaled)
 
 let modelRasterData = null;
 let toolRasterData = null;
@@ -38,6 +42,14 @@ let modelRasterPoints = null;
 let toolRasterPoints = null;
 let toolpathPoints = null;
 
+const log_pre = '[App]';
+const debug = {
+    error: function() { console.error(log_pre, ...arguments) },
+    warn: function() { console.warn(log_pre, ...arguments) },
+    log: function() { console.log(log_pre, ...arguments) },
+    ok: function() { console.log(log_pre, '✅', ...arguments) },
+};
+
 // ============================================================================
 // Parameter Persistence
 // ============================================================================
@@ -49,6 +61,8 @@ function saveParameters() {
     localStorage.setItem('raster-xStep', xStep);
     localStorage.setItem('raster-yStep', yStep);
     localStorage.setItem('raster-angleStep', angleStep);
+    localStorage.setItem('raster-toolSize', toolSize);
+    console.log(`[App] Saved tool size: ${toolSize}mm`);
 
     // Save view checkboxes
     const showWrappedCheckbox = document.getElementById('show-wrapped');
@@ -111,6 +125,16 @@ function loadParameters() {
     if (savedAngleStep !== null) {
         angleStep = parseFloat(savedAngleStep);
         document.getElementById('angle-step').value = angleStep;
+    }
+
+    const savedToolSize = localStorage.getItem('raster-toolSize');
+    if (savedToolSize !== null) {
+        toolSize = parseFloat(savedToolSize);
+        // Format to match dropdown option values (e.g., "3.0" not "3")
+        document.getElementById('tool-size').value = toolSize.toFixed(1);
+        console.log(`[App] Restored tool size: ${toolSize}mm`);
+    } else {
+        console.log(`[App] No saved tool size, using default: ${toolSize}mm`);
     }
 
     // Restore view checkboxes
@@ -190,6 +214,37 @@ function calculateTriangleBounds(triangles) {
     return bounds;
 }
 
+// Calculate current tool diameter from XY dimensions
+function calculateToolDiameter(triangles) {
+    if (!triangles || triangles.length === 0) return 0;
+
+    const bounds = calculateTriangleBounds(triangles);
+    const xSize = bounds.max.x - bounds.min.x;
+    const ySize = bounds.max.y - bounds.min.y;
+
+    // Return the maximum of X and Y dimensions as the diameter
+    return Math.max(xSize, ySize);
+}
+
+// Scale tool triangles to target diameter
+function scaleToolTriangles(triangles, targetDiameter) {
+    if (!triangles || triangles.length === 0) return triangles;
+
+    const currentDiameter = calculateToolDiameter(triangles);
+    if (currentDiameter === 0) return triangles;
+
+    const scale = targetDiameter / currentDiameter;
+    const scaled = new Float32Array(triangles.length);
+
+    for (let i = 0; i < triangles.length; i += 3) {
+        scaled[i] = triangles[i] * scale;       // X
+        scaled[i + 1] = triangles[i + 1] * scale; // Y
+        scaled[i + 2] = triangles[i + 2] * scale; // Z
+    }
+
+    return scaled;
+}
+
 function parseSTL(arrayBuffer) {
     const view = new DataView(arrayBuffer);
 
@@ -250,6 +305,48 @@ function parseASCIISTL(arrayBuffer) {
 }
 
 // ============================================================================
+// STL Creation from Triangles
+// ============================================================================
+
+function createSTLFromTriangles(triangles) {
+    // Create binary STL from triangle array
+    const numTriangles = triangles.length / 9;
+    const bufferSize = 80 + 4 + numTriangles * 50; // header + count + triangles
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+
+    // Write header (80 bytes, can be anything)
+    const headerText = 'Binary STL - rotated model';
+    for (let i = 0; i < Math.min(headerText.length, 80); i++) {
+        view.setUint8(i, headerText.charCodeAt(i));
+    }
+
+    // Write triangle count
+    view.setUint32(80, numTriangles, true);
+
+    // Write triangles
+    let offset = 84;
+    for (let i = 0; i < triangles.length; i += 9) {
+        // Calculate normal (simplified - not computing actual normal)
+        view.setFloat32(offset, 0, true); offset += 4; // nx
+        view.setFloat32(offset, 0, true); offset += 4; // ny
+        view.setFloat32(offset, 1, true); offset += 4; // nz
+
+        // Write vertices
+        for (let j = 0; j < 9; j++) {
+            view.setFloat32(offset, triangles[i + j], true);
+            offset += 4;
+        }
+
+        // Attribute byte count
+        view.setUint16(offset, 0, true);
+        offset += 2;
+    }
+
+    return buffer;
+}
+
+// ============================================================================
 // Model Rotation
 // ============================================================================
 
@@ -300,62 +397,48 @@ function applyModelRotation(axis, direction) {
     // Rotate the mesh using Three.js
     const angle = direction * Math.PI / 2;
     if (axis === 'x') {
-        modelMesh.rotateX(angle);
+        modelMesh.rotateX(-angle);
     } else if (axis === 'y') {
         modelMesh.rotateY(angle);
     } else if (axis === 'z') {
-        modelMesh.rotateZ(angle);
+        modelMesh.rotateZ(-angle);
     }
 
-    // Update triangle data by applying the mesh's world matrix
-    modelMesh.updateMatrixWorld(true);
-    const positionAttr = modelMesh.geometry.attributes.position;
-    modelTriangles = new Float32Array(positionAttr.count * 3);
+    let { geometry } = modelMesh;
 
-    for (let i = 0; i < positionAttr.count; i++) {
-        const vertex = new THREE.Vector3(
-            positionAttr.getX(i),
-            positionAttr.getY(i),
-            positionAttr.getZ(i)
-        );
-        vertex.applyMatrix4(modelMesh.matrixWorld);
-        modelTriangles[i * 3] = vertex.x;
-        modelTriangles[i * 3 + 1] = vertex.y;
-        modelTriangles[i * 3 + 2] = vertex.z;
-    }
-
-    // Reset mesh matrix and update geometry with rotated vertices
-    modelMesh.rotation.set(0, 0, 0);
     modelMesh.updateMatrix();
+    geometry.applyMatrix4(modelMesh.matrix);
+    modelMesh.position.set(0, 0, 0);
+    modelMesh.rotation.set(0, 0, 0);
+    modelMesh.scale.set(1, 1, 1);
     modelMesh.updateMatrixWorld(true);
-
-    for (let i = 0; i < positionAttr.count; i++) {
-        positionAttr.setXYZ(i,
-            modelTriangles[i * 3],
-            modelTriangles[i * 3 + 1],
-            modelTriangles[i * 3 + 2]
-        );
-    }
-    positionAttr.needsUpdate = true;
-    modelMesh.geometry.computeVertexNormals();
-    modelMesh.geometry.computeBoundingBox();
+    geometry.attributes.position.needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
 
     // Clear raster and toolpath data (needs recomputation)
     modelRasterData = null;
     toolpathData = null;
+
+    // Update cached STL with rotated triangles
+    modelSTL = createSTLFromTriangles(modelTriangles);
+    cacheSTL('model-stl', modelSTL, document.getElementById('model-status').textContent || 'model.stl')
+        .catch(err => debug.warn('Failed to cache rotated model:', err));
 
     updateButtonStates();
     updateInfo(`Model rotated ${direction > 0 ? '+' : ''}${direction * 90}° around ${axis.toUpperCase()}`);
 }
 
 function resetModelRotation() {
-    if (!modelMesh || !modelSTL) {
+    if (!modelMesh || !modelOriginalSTL) {
         updateInfo('No model loaded');
         return;
     }
 
-    // Re-parse from original STL
-    modelTriangles = parseSTL(modelSTL);
+    // Re-parse from ORIGINAL STL (not current/rotated)
+    modelTriangles = parseSTL(modelOriginalSTL);
+    modelSTL = modelOriginalSTL; // Reset current to original
     modelRotation = { x: 0, y: 0, z: 0 };
 
     // Update the existing mesh geometry
@@ -379,6 +462,10 @@ function resetModelRotation() {
     // Clear raster and toolpath data
     modelRasterData = null;
     toolpathData = null;
+
+    // Update cache with original STL
+    cacheSTL('model-stl', modelSTL, document.getElementById('model-status').textContent || 'model.stl')
+        .catch(err => debug.warn('Failed to cache reset model:', err));
 
     updateButtonStates();
     updateInfo('Model rotation reset');
@@ -405,6 +492,10 @@ async function loadSTLFile(isModel) {
             const cacheKey = isModel ? 'model-stl' : 'tool-stl';
             await cacheSTL(cacheKey, arrayBuffer, file.name);
 
+            modelRasterData = undefined;
+            toolpathData = undefined;
+            updateVisualization();
+
             updateInfo(`Loaded ${file.name}: ${(triangles.length / 9).toLocaleString()} triangles`);
             resolve({ arrayBuffer, triangles, name: file.name });
         };
@@ -426,8 +517,8 @@ async function initRasterPath() {
         mode: mode,
         resolution: resolution,
         rotationStep: mode === 'radial' ? angleStep : undefined,
-        // trianglesPerTile: 15000,
-        debug: true  // Enable debug logging
+        batchDivisor: 5,
+        debug: true
     });
 
     await rasterPath.init();
@@ -446,7 +537,6 @@ async function rasterizeAll() {
 
         // Load tool (works for both modes)
         if (toolTriangles) {
-            updateInfo('Loading tool...');
             const t0 = performance.now();
             toolRasterData = await rasterPath.loadTool({
                 triangles: toolTriangles
@@ -476,14 +566,13 @@ async function rasterizeAll() {
 
             // Load terrain (stores triangles for later, doesn't rasterize yet)
             if (modelTriangles) {
-                updateInfo('Loading terrain...');
                 const t0 = performance.now();
                 await rasterPath.loadTerrain({
                     triangles: modelTriangles,
                     zFloor: zFloor
                 });
                 const t1 = performance.now();
-                updateInfo(`Terrain loaded in ${(t1 - t0).toFixed(0)}ms (will rasterize during toolpath generation)`);
+                updateInfo(`Terrain loaded in ${(t1 - t0).toFixed(0)}ms (rasterized in toolpath generation)`);
             } else {
                 updateInfo('Tool loaded. Load model and click "Generate Toolpath" to continue.');
             }
@@ -502,7 +591,7 @@ async function rasterizeAll() {
         updateButtonStates();
 
     } catch (error) {
-        console.error('Rasterization error:', error);
+        debug.error('Rasterization error:', error);
         updateInfo(`Error: ${error.message}`);
     }
 }
@@ -544,19 +633,19 @@ async function generateToolpath() {
             const numPoints = toolpathData.pathData.length;
             updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
         } else {
-            console.log('Radial toolpaths generated:', toolpathData);
-            console.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
+            // debug.log('[Radial] Toolpaths generated:', toolpathData);
+            debug.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
             updateInfo(`Toolpath generated: ${toolpathData.numStrips} strips, ${toolpathData.totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
 
             // Store terrain strips for visualization
             if (toolpathData.terrainStrips) {
                 modelRasterData = toolpathData.terrainStrips;
-                console.log('[Radial] Terrain strips available:', modelRasterData.length, 'strips');
+                debug.log('[Radial] Terrain strips available:', modelRasterData.length, 'strips');
 
                 // DEBUG: Check X range in strips
                 if (modelRasterData.length > 0) {
                     const strip0 = modelRasterData[0];
-                    console.log('[Radial] Strip 0 structure:', {
+                    debug.log('[Radial] Strip 0 structure:', {
                         angle: strip0.angle,
                         pointCount: strip0.pointCount,
                         positionsLength: strip0.positions?.length,
@@ -573,7 +662,7 @@ async function generateToolpath() {
                             minX = Math.min(minX, x);
                             maxX = Math.max(maxX, x);
                         }
-                        console.log('[Radial] Strip 0 actual X range in positions:', minX.toFixed(2), 'to', maxX.toFixed(2));
+                        debug.log('[Radial] Strip 0 actual X range in positions:', minX.toFixed(2), 'to', maxX.toFixed(2));
                     }
                 }
             } else if (toolpathData.strips && toolpathData.strips[0]?.terrainBounds) {
@@ -582,7 +671,7 @@ async function generateToolpath() {
                     angle: strip.angle,
                     bounds: strip.terrainBounds
                 }));
-                console.log('[Radial] Batched mode: created synthetic terrain strips from bounds:', modelRasterData.length, 'strips');
+                debug.log('[Radial] Batched mode: created synthetic terrain strips from bounds:', modelRasterData.length, 'strips');
             }
             // This is fine - we only need toolpathData for visualization
         }
@@ -593,7 +682,7 @@ async function generateToolpath() {
         updateVisualization();
 
     } catch (error) {
-        console.error('Toolpath generation error:', error);
+        debug.error('Toolpath generation error:', error);
         updateInfo(`Error: ${error.message}`);
     }
 }
@@ -836,13 +925,13 @@ function displayModelRaster(wrapped) {
         // Radial: modelRasterData is an array of strips
         // Each strip has: { angle, positions (sparse XYZ), gridWidth, gridHeight, bounds }
         if (!Array.isArray(modelRasterData)) {
-            console.error('[Display] modelRasterData is not an array of strips');
+            debug.error('[Display] modelRasterData is not an array of strips');
             return;
         }
 
         if (wrapped) {
             // Wrap each strip around X-axis at its angle
-            console.log('[Display] Wrapping', modelRasterData.length, 'strips');
+            debug.log('[Display] Wrapping', modelRasterData.length, 'strips');
 
             // Track overall X range for debug
             let overallMinX = Infinity, overallMaxX = -Infinity;
@@ -876,14 +965,14 @@ function displayModelRaster(wrapped) {
                 }
             }
 
-            console.log('[Display] Rendered', totalPointsRendered, 'points from', modelRasterData.length, 'strips');
-            console.log('[Display] X range: [' + overallMinX.toFixed(2) + ', ' + overallMaxX.toFixed(2) + ']');
+            debug.log('[Display] Rendered', totalPointsRendered, 'points from', modelRasterData.length, 'strips');
+            debug.log('[Display] X range: [' + overallMinX.toFixed(2) + ', ' + overallMaxX.toFixed(2) + ']');
 
             // DEBUG: Check angle coverage
             const angles = modelRasterData.map(s => s.angle).sort((a, b) => a - b);
-            console.log('[Display] Angle range: [' + angles[0].toFixed(1) + '°, ' + angles[angles.length-1].toFixed(1) + '°]');
-            console.log('[Display] First 5 angles:', angles.slice(0, 5).map(a => a.toFixed(1) + '°').join(', '));
-            console.log('[Display] Last 5 angles:', angles.slice(-5).map(a => a.toFixed(1) + '°').join(', '));
+            debug.log('[Display] Angle range: [' + angles[0].toFixed(1) + '°, ' + angles[angles.length-1].toFixed(1) + '°]');
+            debug.log('[Display] First 5 angles:', angles.slice(0, 5).map(a => a.toFixed(1) + '°').join(', '));
+            debug.log('[Display] Last 5 angles:', angles.slice(-5).map(a => a.toFixed(1) + '°').join(', '));
         } else {
             // Show unwrapped (planar) - lay out strips side by side
             for (let stripIdx = 0; stripIdx < modelRasterData.length; stripIdx++) {
@@ -964,7 +1053,9 @@ function displayToolRaster() {
 }
 
 function displayToolpaths(wrapped) {
-    if (!toolpathData) return;
+    if (!toolpathData) {
+        return;
+    }
 
     if (mode === 'planar') {
         // Planar toolpaths
@@ -977,9 +1068,9 @@ function displayToolpaths(wrapped) {
 
         // Check if we need to downsample
         if (totalPoints > MAX_DISPLAY_POINTS) {
-            console.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
-            console.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
-            console.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
+            debug.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
+            debug.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
+            debug.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
             return;
         }
 
@@ -1037,27 +1128,27 @@ function displayToolpaths(wrapped) {
 
     const MAX_DISPLAY_POINTS = 10000000; // 10M points max for display
 
-    console.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips,', totalPoints, 'total points');
+    debug.log('[Toolpath Display] Radial V2 mode:', strips.length, 'strips,', totalPoints, 'total points');
 
     // Check if we need to skip visualization
     if (totalPoints > MAX_DISPLAY_POINTS) {
-        console.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
-        console.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
-        console.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
+        debug.warn(`[Toolpath Display] Toolpath too large for visualization: ${(totalPoints/1e6).toFixed(1)}M points`);
+        debug.warn(`[Toolpath Display] Skipping display (max: ${(MAX_DISPLAY_POINTS/1e6).toFixed(1)}M points)`);
+        debug.warn(`[Toolpath Display] Toolpath was generated successfully - only visualization is skipped`);
         return;
     }
 
     // DEBUG: Check angle distribution AND data
     if (strips.length > 0) {
         const angleChecks = [0, 180, 359, 360, 361, 540, 719].filter(i => i < strips.length);
-        console.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
+        debug.log('[Toolpath Display] Angle check at indices:', angleChecks.map(i => `${i}=${strips[i].angle.toFixed(1)}°`).join(', '));
         // Check if pathData is actually different between strips
         if (strips.length > 360) {
             const samples0 = strips[0].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
             const samples360 = strips[360].pathData.slice(0, 5).map(v => v.toFixed(3)).join(',');
-            console.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
-            console.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
-            console.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
+            debug.log('[Toolpath Display] Data check: strip 0 first 5 values:', samples0);
+            debug.log('[Toolpath Display] Data check: strip 360 first 5 values:', samples360);
+            debug.log('[Toolpath Display] Data is', samples0 === samples360 ? 'SAME (BUG!)' : 'DIFFERENT (OK)');
         }
     }
 
@@ -1073,7 +1164,7 @@ function displayToolpaths(wrapped) {
             maxVal = Math.max(maxVal, firstStrip.pathData[i]);
         }
 
-        console.log('[Toolpath Display] First strip sample:', {
+        debug.log('[Toolpath Display] First strip sample:', {
             angle: firstStrip.angle,
             numScanlines: firstStrip.numScanlines,
             pointsPerLine: firstStrip.pointsPerLine,
@@ -1205,7 +1296,7 @@ function displayToolpaths(wrapped) {
 // ============================================================================
 
 function updateInfo(text) {
-    console.log(text);
+    debug.log(text);
     document.getElementById('info').textContent = text;
 }
 
@@ -1258,6 +1349,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Handle both old format (raw ArrayBuffer) and new format (object with arrayBuffer and name)
         const isOldFormat = cachedModel instanceof ArrayBuffer;
         modelSTL = isOldFormat ? cachedModel : cachedModel.arrayBuffer;
+        modelOriginalSTL = modelSTL; // Cache might have rotated model, but treat as original for now
         modelTriangles = parseSTL(modelSTL);
         document.getElementById('model-status').textContent = isOldFormat ? 'Cached model' : (cachedModel.name || 'Cached model');
         displayModelMesh();
@@ -1267,9 +1359,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (cachedTool) {
         // Handle both old format (raw ArrayBuffer) and new format (object with arrayBuffer and name)
         const isOldFormat = cachedTool instanceof ArrayBuffer;
-        toolSTL = isOldFormat ? cachedTool : cachedTool.arrayBuffer;
-        toolTriangles = parseSTL(toolSTL);
+        toolOriginalSTL = isOldFormat ? cachedTool : cachedTool.arrayBuffer;
+        toolOriginalTriangles = parseSTL(toolOriginalSTL);
+
+        // Scale tool to target size
+        const originalDiameter = calculateToolDiameter(toolOriginalTriangles);
+        toolTriangles = scaleToolTriangles(toolOriginalTriangles, toolSize);
+        toolSTL = createSTLFromTriangles(toolTriangles);
+
+        // Update status
         document.getElementById('tool-status').textContent = isOldFormat ? 'Cached tool' : (cachedTool.name || 'Cached tool');
+        document.getElementById('tool-size-status').textContent =
+            `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
+
         displayToolMesh();
     }
 
@@ -1350,6 +1452,52 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateButtonStates();
     });
 
+    // Tool size change
+    document.getElementById('tool-size').addEventListener('change', async (e) => {
+        toolSize = parseFloat(e.target.value);
+
+        // If tool is loaded, rescale it
+        if (toolOriginalTriangles) {
+            const originalDiameter = calculateToolDiameter(toolOriginalTriangles);
+            toolTriangles = scaleToolTriangles(toolOriginalTriangles, toolSize);
+            toolSTL = createSTLFromTriangles(toolTriangles);
+
+            // Update status
+            document.getElementById('tool-size-status').textContent =
+                `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
+
+            // Check if tool was already loaded (before clearing)
+            const wasToolLoaded = toolRasterData !== null;
+
+            // Clear raster data (tool size changed)
+            toolRasterData = null;
+            toolpathData = null;
+
+            displayToolMesh();
+
+            // If rasterPath exists and tool was already loaded, reload it with new size
+            if (rasterPath && wasToolLoaded) {
+                updateInfo(`Reloading tool at ${toolSize}mm...`);
+                try {
+                    const t0 = performance.now();
+                    toolRasterData = await rasterPath.loadTool({
+                        triangles: toolTriangles
+                    });
+                    const t1 = performance.now();
+                    updateInfo(`Tool reloaded at ${toolSize}mm in ${(t1 - t0).toFixed(0)}ms`);
+                } catch (error) {
+                    updateInfo(`Error reloading tool: ${error.message}`);
+                }
+            } else {
+                updateInfo(`Tool size changed to ${toolSize}mm - click Rasterize to apply`);
+            }
+
+            updateButtonStates();
+        }
+
+        saveParameters();
+    });
+
     // Model rotation buttons
     document.querySelectorAll('.rotate-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1366,6 +1514,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const result = await loadSTLFile(true);
         if (result) {
             modelSTL = result.arrayBuffer;
+            modelOriginalSTL = result.arrayBuffer; // Save original for reset
             modelTriangles = result.triangles;
             modelRotation = { x: 0, y: 0, z: 0 };  // Reset rotation on new model
             document.getElementById('model-status').textContent = result.name;
@@ -1383,9 +1532,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('load-tool').addEventListener('click', async () => {
         const result = await loadSTLFile(false);
         if (result) {
-            toolSTL = result.arrayBuffer;
-            toolTriangles = result.triangles;
+            toolOriginalSTL = result.arrayBuffer;
+            toolOriginalTriangles = result.triangles;
+
+            // Calculate original diameter and scale to target size
+            const originalDiameter = calculateToolDiameter(toolOriginalTriangles);
+            toolTriangles = scaleToolTriangles(toolOriginalTriangles, toolSize);
+            toolSTL = createSTLFromTriangles(toolTriangles);
+
+            // Update status with size info
             document.getElementById('tool-status').textContent = result.name;
+            document.getElementById('tool-size-status').textContent =
+                `Original: ${originalDiameter.toFixed(2)}mm → Scaled: ${toolSize}mm`;
 
             // Clear raster data
             toolRasterData = null;

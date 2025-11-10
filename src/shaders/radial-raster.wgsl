@@ -17,6 +17,7 @@ struct Uniforms {
     filter_mode: u32,          // 0 = max Z (terrain), 1 = min Z (tool)
     num_buckets: u32,          // Total number of X-buckets
     start_angle: f32,          // Starting angle offset in radians (for batching)
+    bucket_offset: u32,        // Offset for bucket batching (bucket_idx in batch writes to bucket_offset + bucket_idx in output)
 }
 
 struct BucketInfo {
@@ -179,11 +180,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
 
         // Write output
-        // Layout: bucket_idx * numAngles * bucketWidth * gridHeight
+        // Layout: (bucket_offset + bucket_idx) * numAngles * bucketWidth * gridHeight
         //       + angle_idx * bucketWidth * gridHeight
         //       + grid_y * bucketWidth
         //       + local_x
-        let output_idx = bucket_idx * uniforms.num_angles * uniforms.bucket_grid_width * uniforms.grid_y_height
+        let output_idx = (uniforms.bucket_offset + bucket_idx) * uniforms.num_angles * uniforms.bucket_grid_width * uniforms.grid_y_height
                        + angle_idx * uniforms.bucket_grid_width * uniforms.grid_y_height
                        + grid_y * uniforms.bucket_grid_width
                        + local_x;

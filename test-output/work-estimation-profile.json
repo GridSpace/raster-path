@@ -1,0 +1,451 @@
+{
+  "timestamp": "2025-11-08T23:30:35.556Z",
+  "configs": [
+    {
+      "name": "terrain",
+      "file": "../benchmark/fixtures/terrain.stl",
+      "resolution": 0.05,
+      "rotationStep": 1,
+      "divisors": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "expectedTriangles": 75586
+    },
+    {
+      "name": "lathe-cylinder",
+      "file": "../benchmark/fixtures/lathe-cylinder.stl",
+      "resolution": 0.05,
+      "rotationStep": 1,
+      "divisors": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "expectedTriangles": 90620
+    },
+    {
+      "name": "lathe-cylinder-2",
+      "file": "../benchmark/fixtures/lathe-cylinder-2.stl",
+      "resolution": 0.05,
+      "rotationStep": 1,
+      "divisors": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "expectedTriangles": 144890
+    },
+    {
+      "name": "lathe-torture",
+      "file": "../benchmark/fixtures/lathe-torture.stl",
+      "resolution": 0.05,
+      "rotationStep": 1,
+      "divisors": [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32
+      ],
+      "expectedTriangles": 1491718
+    }
+  ],
+  "results": [
+    {
+      "success": true,
+      "model": "terrain",
+      "divisor": 1,
+      "triangleCount": 75586,
+      "timing": {
+        "tool": 15.199999988079071,
+        "terrain": 3.899999976158142,
+        "toolpath": 2729.199999988079,
+        "total": 2748.2999999523163
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "terrain",
+      "divisor": 2,
+      "triangleCount": 75586,
+      "timing": {
+        "tool": 13.899999976158142,
+        "terrain": 1.399999976158142,
+        "toolpath": 2662.600000023842,
+        "total": 2677.899999976158
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "terrain",
+      "divisor": 4,
+      "triangleCount": 75586,
+      "timing": {
+        "tool": 12.400000035762787,
+        "terrain": 4.299999952316284,
+        "toolpath": 2766.900000035763,
+        "total": 2783.600000023842
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "terrain",
+      "divisor": 8,
+      "triangleCount": 75586,
+      "timing": {
+        "tool": 12.200000047683716,
+        "terrain": 1.5999999642372131,
+        "toolpath": 2962.900000035763,
+        "total": 2976.7000000476837
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "terrain",
+      "divisor": 16,
+      "triangleCount": 75586,
+      "timing": {
+        "tool": 12.699999988079071,
+        "terrain": 1.699999988079071,
+        "toolpath": 3310.600000023842,
+        "total": 3325
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "terrain",
+      "divisor": 32,
+      "triangleCount": 75586,
+      "timing": {
+        "tool": 12,
+        "terrain": 1.699999988079071,
+        "toolpath": 3881.699999988079,
+        "total": 3895.399999976158
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder",
+      "divisor": 1,
+      "triangleCount": 90620,
+      "timing": {
+        "tool": 12.100000023841858,
+        "terrain": 2.099999964237213,
+        "toolpath": 3347,
+        "total": 3361.199999988079
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 720000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder",
+      "divisor": 2,
+      "triangleCount": 90620,
+      "timing": {
+        "tool": 13.899999976158142,
+        "terrain": 4.5,
+        "toolpath": 3580.400000035763,
+        "total": 3598.800000011921
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 720000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder",
+      "divisor": 4,
+      "triangleCount": 90620,
+      "timing": {
+        "tool": 12.5,
+        "terrain": 8.599999964237213,
+        "toolpath": 3886.699999988079,
+        "total": 3907.7999999523163
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 720000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder",
+      "divisor": 8,
+      "triangleCount": 90620,
+      "timing": {
+        "tool": 12.400000035762787,
+        "terrain": 1.899999976158142,
+        "toolpath": 4389.399999976158,
+        "total": 4403.699999988079
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 720000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder",
+      "divisor": 16,
+      "triangleCount": 90620,
+      "timing": {
+        "tool": 12.699999988079071,
+        "terrain": 8.899999976158142,
+        "toolpath": 5367.800000011921,
+        "total": 5389.399999976158
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 720000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder",
+      "divisor": 32,
+      "triangleCount": 90620,
+      "timing": {
+        "tool": 14.100000023841858,
+        "terrain": 8.5,
+        "toolpath": 6748.599999964237,
+        "total": 6771.199999988079
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 720000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder-2",
+      "divisor": 1,
+      "triangleCount": 144890,
+      "timing": {
+        "tool": 13.600000023841858,
+        "terrain": 0.5999999642372131,
+        "toolpath": 6481,
+        "total": 6495.199999988079
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 1447200
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder-2",
+      "divisor": 2,
+      "triangleCount": 144890,
+      "timing": {
+        "tool": 14,
+        "terrain": 1,
+        "toolpath": 7100.399999976158,
+        "total": 7115.399999976158
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 1447200
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder-2",
+      "divisor": 4,
+      "triangleCount": 144890,
+      "timing": {
+        "tool": 13.399999976158142,
+        "terrain": 0.800000011920929,
+        "toolpath": 9297.199999988079,
+        "total": 9311.399999976158
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 1447200
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder-2",
+      "divisor": 8,
+      "triangleCount": 144890,
+      "timing": {
+        "tool": 12.800000011920929,
+        "terrain": 2.800000011920929,
+        "toolpath": 8386.300000011921,
+        "total": 8401.900000035763
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 1447200
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder-2",
+      "divisor": 16,
+      "triangleCount": 144890,
+      "timing": {
+        "tool": 13,
+        "terrain": 2.5,
+        "toolpath": 13505.5,
+        "total": 13521
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 1447200
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-cylinder-2",
+      "divisor": 32,
+      "triangleCount": 144890,
+      "timing": {
+        "tool": 13.300000011920929,
+        "terrain": 0.699999988079071,
+        "toolpath": 10203.400000035763,
+        "total": 10217.400000035763
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 1447200
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-torture",
+      "divisor": 1,
+      "triangleCount": 1491718,
+      "timing": {
+        "tool": 13.199999988079071,
+        "terrain": 9.300000011920929,
+        "toolpath": 1998,
+        "total": 2020.5
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-torture",
+      "divisor": 2,
+      "triangleCount": 1491718,
+      "timing": {
+        "tool": 13.300000011920929,
+        "terrain": 9.800000011920929,
+        "toolpath": 1980.8999999761581,
+        "total": 2004
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-torture",
+      "divisor": 4,
+      "triangleCount": 1491718,
+      "timing": {
+        "tool": 14.100000023841858,
+        "terrain": 10.5,
+        "toolpath": 2114.199999988079,
+        "total": 2138.800000011921
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-torture",
+      "divisor": 8,
+      "triangleCount": 1491718,
+      "timing": {
+        "tool": 13.5,
+        "terrain": 9.600000023841858,
+        "toolpath": 2474.899999976158,
+        "total": 2498
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-torture",
+      "divisor": 16,
+      "triangleCount": 1491718,
+      "timing": {
+        "tool": 13,
+        "terrain": 10.699999988079071,
+        "toolpath": 3433.199999988079,
+        "total": 3456.899999976158
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    },
+    {
+      "success": true,
+      "model": "lathe-torture",
+      "divisor": 32,
+      "triangleCount": 1491718,
+      "timing": {
+        "tool": 15.300000011920929,
+        "terrain": 9.099999964237213,
+        "toolpath": 4924.600000023842,
+        "total": 4949
+      },
+      "result": {
+        "numStrips": 360,
+        "totalPoints": 540000
+      }
+    }
+  ]
+}
