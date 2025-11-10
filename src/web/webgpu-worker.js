@@ -1792,7 +1792,7 @@ async function radialRasterize({
     const uintView = new Uint32Array(uniformView);
 
     floatView[0] = resolution;                                          // f32
-    floatView[1] = angleStep * (Math.PI / 180);                        // f32
+    floatView[1] = angleStep * (Math.PI / 180);                         // f32
     uintView[2] = numAngles;                                            // u32
     floatView[3] = maxRadius;                                           // f32
     floatView[4] = toolWidth;                                           // f32
@@ -1851,12 +1851,12 @@ async function radialRasterize({
     commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputSize);
     device.queue.submit([commandEncoder.finish()]);
 
-    // CRITICAL: Wait for GPU to finish before reading results
+    // Wait for GPU to finish before reading results
     await device.queue.onSubmittedWorkDone();
-
     await stagingBuffer.mapAsync(GPUMapMode.READ);
-    const outputData = new Float32Array(stagingBuffer.getMappedRange());
-    const outputCopy = new Float32Array(outputData);
+    // const outputData = new Float32Array(stagingBuffer.getMappedRange());
+    // const outputCopy = new Float32Array(outputData);
+    const outputCopy = new Float32Array(stagingBuffer.getMappedRange().slice());
     stagingBuffer.unmap();
 
     // Note: Don't cleanup triangle/bucket/indices buffers here if we'll return them for reuse
@@ -2210,6 +2210,7 @@ self.onmessage = async function(e) {
                     const batchTotalTime = performance.now() - batchStartTime;
 
                     Object.assign(batchInfo, {
+                        'mkbuf': (bufferCreateTime | 0),
                         'paths': (toolpathTime | 0),
                         'strips': allStripToolpaths.length,
                         'total': (batchTotalTime | 0)
