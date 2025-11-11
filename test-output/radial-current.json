@@ -14,7 +14,7 @@
     "toolPoints": 1943,
     "numStrips": 360,
     "totalPoints": 54000,
-    "checksum": 312526796,
+    "checksum": 312526634,
     "sampleValues": [
       "8.93",
       "9.42",
@@ -49,9 +49,9 @@
     ]
   },
   "timing": {
-    "terrain": 3.899999976158142,
-    "tool": 12.800000011920929,
-    "toolpath": 1273.7000000476837,
-    "total": 1290.4000000357628
+    "terrain": 3.5,
+    "tool": 12.200000017881393,
+    "toolpath": 2534.2999999821186,
+    "total": 2550
   }
 }

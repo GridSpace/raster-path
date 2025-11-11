@@ -1,27 +1,47 @@
 #!/usr/bin/env node
 /**
- * Build script: Injects shader code into webgpu-worker.js
+ * Build script: Bundle worker modules with esbuild, then inject shader code
  *
- * Replaces placeholders like SHADER-radial-cull with shader file contents
+ * 1. Bundle all worker modules (raster-worker.js + imports) into single file
+ * 2. Replace shader placeholders like 'SHADER:radial-raster' with shader file contents
  */
 
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import * as esbuild from 'esbuild';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const SHADER_DIR = path.join(__dirname, '../src/shaders');
-const WORKER_SRC = path.join(__dirname, '../src/web/webgpu-worker.js');
+const WORKER_SRC = path.join(__dirname, '../src/core/raster-worker.js');
 const BUILD_DIR = path.join(__dirname, '../build');
-const WORKER_DEST = path.join(BUILD_DIR, 'webgpu-worker.js');
+const WORKER_BUNDLED = path.join(BUILD_DIR, 'raster-worker.bundled.js');
+const WORKER_DEST = path.join(BUILD_DIR, 'raster-worker.js');
 
-// Read worker source
-let workerCode = fs.readFileSync(WORKER_SRC, 'utf8');
+// Ensure build directory exists
+if (!fs.existsSync(BUILD_DIR)) {
+    fs.mkdirSync(BUILD_DIR, { recursive: true });
+}
 
-// Find all shader placeholders
-const shaderRegex = /'SHADER:([a-z0-9-]+)'/g;
+// Step 1: Bundle worker modules with esbuild
+console.log('📦 Bundling worker modules with esbuild...');
+await esbuild.build({
+    entryPoints: [WORKER_SRC],
+    bundle: true,
+    format: 'esm',
+    outfile: WORKER_BUNDLED,
+    platform: 'browser',
+    target: 'es2020',
+});
+console.log(`✅ Bundled: ${WORKER_BUNDLED}`);
+
+// Step 2: Read bundled code and inject shaders
+let workerCode = fs.readFileSync(WORKER_BUNDLED, 'utf8');
+
+// Find all shader placeholders (handle both single and double quotes)
+const shaderRegex = /['"]SHADER:([a-z0-9-]+)['"]/g;
 let match;
 const replacements = [];
 
@@ -63,3 +83,7 @@ console.log(`🔨 Build ID: ${buildId}`);
 // Write output
 fs.writeFileSync(WORKER_DEST, workerCode, 'utf8');
 console.log(`✅ Built: ${WORKER_DEST}`);
+
+// Clean up intermediate bundled file
+fs.unlinkSync(WORKER_BUNDLED);
+console.log('🧹 Cleaned up intermediate bundle');

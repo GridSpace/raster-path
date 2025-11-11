@@ -48,13 +48,9 @@
  * @property {'planar'|'radial'} mode - Rasterization mode (default: 'planar')
  * @property {boolean} autoTiling - Automatically tile large datasets (default: true)
  * @property {number} gpuMemorySafetyMargin - Safety margin as percentage (default: 0.8 = 80%)
- * @property {number} maxConcurrentTiles - Max concurrent tiles for radial rasterization (default: 50)
  * @property {number} maxGPUMemoryMB - Maximum GPU memory per tile (default: 256MB)
- * @property {number} minTileSize - Minimum tile dimension (default: 50mm)
- * @property {number} radialRotationOffset - Radial mode: rotation offset in degrees (default: 0, use 90 to start at Z-axis)
  * @property {number} resolution - Grid step size in mm (required)
  * @property {number} rotationStep - Radial mode only: degrees between rays (e.g., 1.0 = 360 rays)
- * @property {number} trianglesPerTile - Target triangles per tile for radial rasterization (default: calculated)
  * @property {number} batchDivisor - Testing parameter to artificially divide batch size (default: 1)
  * @property {boolean} debug - Enable debug logging (default: false)
  * @property {boolean} quiet - Suppress log output (default: false)
@@ -110,14 +106,10 @@ export class RasterPath {
 
         // Configuration with defaults
         this.config = {
-            workerName: config.workerName ?? "webgpu-worker.js",
+            workerName: config.workerName ?? "raster-worker.js",
             maxGPUMemoryMB: config.maxGPUMemoryMB ?? 256,
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             autoTiling: config.autoTiling ?? true,
-            minTileSize: config.minTileSize ?? 50,
-            maxConcurrentTiles: config.maxConcurrentTiles ?? 10,
-            trianglesPerTile: config.trianglesPerTile, // undefined = auto-calculate
-            radialRotationOffset: config.radialRotationOffset ?? 0, // degrees
             batchDivisor: config.batchDivisor ?? 1, // For testing batching overhead
             debug: config.debug,
             quiet: config.quiet
@@ -138,14 +130,14 @@ export class RasterPath {
 
         return new Promise((resolve, reject) => {
             try {
-                // Create worker from the webgpu-worker.js file
+                // Create worker from the raster-worker.js file
                 const workerName = this.config.workerName;
                 const isBuildVersion = import.meta.url.includes('/build/') || import.meta.url.includes('raster-path.js');
                 const workerPath = workerName
                     ? new URL(workerName, import.meta.url)
                 : isBuildVersion
-                    ? new URL(`./webgpu-worker.js`, import.meta.url)
-                    : new URL(`./web/webgpu-worker.js`, import.meta.url);
+                    ? new URL(`./raster-worker.js`, import.meta.url)
+                    : new URL(`../core/raster-worker.js`, import.meta.url);
                 this.worker = new Worker(workerPath, { type: 'module' });
 
                 // Set up message handler
