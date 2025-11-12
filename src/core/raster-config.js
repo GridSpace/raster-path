@@ -113,10 +113,7 @@ export async function initWebGPU() {
 
         // Request device with higher limits for large meshes
         const adapterLimits = adapter.limits;
-        debug.log('Adapter limits:', {
-            maxStorageBufferBindingSize: adapterLimits.maxStorageBufferBindingSize,
-            maxBufferSize: adapterLimits.maxBufferSize
-        });
+        debug.log('Adapter limits:', adapterLimits);
 
         device = await adapter.requestDevice({
             requiredLimits: {

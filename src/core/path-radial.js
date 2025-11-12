@@ -610,7 +610,6 @@ export async function generateRadialToolpaths({
 
         Object.assign(batchInfo, {
             'prep': batchInfo.prep || 0,
-            'gpu': batchInfo.gpu || 0,
             'stitch': batchInfo.stitch || 0,
             'raster': batchInfo.raster || 0,
             'paths': (toolpathTime | 0),

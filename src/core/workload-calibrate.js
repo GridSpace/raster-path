@@ -114,17 +114,71 @@ async function testWorkloadDispatch(device, pipeline, workgroupSize, triangleTes
     passEncoder.dispatchWorkgroups(dispatchX, dispatchY, 1);
     passEncoder.end();
 
-    // Readback
+    // Submit the compute work
+    device.queue.submit([commandEncoder.finish()]);
+
+    // TEST: Queue progress checkpoints while GPU works
+    const numCheckpoints = 5;
+    const checkpointInterval = 100; // ms
+    const progressSnapshots = [];
+
+    for (let i = 0; i < numCheckpoints; i++) {
+        await new Promise(resolve => setTimeout(resolve, checkpointInterval));
+
+        const checkpointStart = performance.now();
+
+        // Queue a copy to read progress
+        const checkpointEncoder = device.createCommandEncoder();
+        const checkpointStaging = device.createBuffer({
+            size: totalThreads * 4,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        checkpointEncoder.copyBufferToBuffer(completionBuffer, 0, checkpointStaging, 0, totalThreads * 4);
+        device.queue.submit([checkpointEncoder.finish()]);
+
+        // Wait for this checkpoint copy to complete
+        await checkpointStaging.mapAsync(GPUMapMode.READ);
+        const checkpointElapsed = performance.now() - checkpointStart;
+
+        // Count completed threads
+        const checkpointData = new Uint32Array(checkpointStaging.getMappedRange());
+        let completedThreads = 0;
+        for (let j = 0; j < totalThreads; j++) {
+            if (checkpointData[j] === 1) completedThreads++;
+        }
+
+        progressSnapshots.push({
+            checkpoint: i + 1,
+            timeMs: Math.round(performance.now() - startTime),
+            completedThreads,
+            totalThreads,
+            percentComplete: Math.round((completedThreads / totalThreads) * 100),
+            checkpointLatencyMs: checkpointElapsed.toFixed(2)
+        });
+
+        checkpointStaging.unmap();
+        checkpointStaging.destroy();
+    }
+
+    // Final readback
     const stagingBuffer = device.createBuffer({
         size: totalThreads * 4,
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
 
-    commandEncoder.copyBufferToBuffer(completionBuffer, 0, stagingBuffer, 0, totalThreads * 4);
-    device.queue.submit([commandEncoder.finish()]);
+    const finalEncoder = device.createCommandEncoder();
+    finalEncoder.copyBufferToBuffer(completionBuffer, 0, stagingBuffer, 0, totalThreads * 4);
+    device.queue.submit([finalEncoder.finish()]);
 
     await device.queue.onSubmittedWorkDone();
     const elapsed = performance.now() - startTime;
+
+    // Log progress snapshots
+    if (progressSnapshots.length > 0) {
+        console.log('\n📊 Progress Checkpoints:');
+        console.table(progressSnapshots);
+    }
 
     await stagingBuffer.mapAsync(GPUMapMode.READ);
     const completionData = new Uint32Array(stagingBuffer.getMappedRange());
