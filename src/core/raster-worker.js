@@ -54,6 +54,7 @@ import { initWebGPU, setConfig, updateConfig, deviceCapabilities, debug, device 
 import { rasterizeMesh } from './raster-planar.js';
 import { generateToolpath } from './path-planar.js';
 import { generateRadialToolpaths } from './path-radial.js';
+import { generateTracingToolpaths } from './path-tracing.js';
 import { calibrateGPU } from './workload-calibrate.js';
 
 // Global error handler for uncaught errors in worker
@@ -125,6 +126,30 @@ self.onmessage = async function(e) {
                     type: 'radial-toolpaths-complete',
                     data: radialToolpathResult
                 }, toolpathTransferBuffers);
+                break;
+
+            case 'tracing-generate-toolpaths':
+                const tracingResult = await generateTracingToolpaths({
+                    paths: data.paths,
+                    terrainPositions: data.terrainPositions,
+                    terrainData: data.terrainData,
+                    toolPositions: data.toolPositions,
+                    step: data.step,
+                    gridStep: data.gridStep,
+                    terrainBounds: data.terrainBounds,
+                    zFloor: data.zFloor,
+                    onProgress: (progressData) => {
+                        self.postMessage({
+                            type: 'tracing-progress',
+                            data: progressData.data
+                        });
+                    }
+                });
+                const tracingTransferBuffers = tracingResult.paths.map(p => p.buffer);
+                self.postMessage({
+                    type: 'tracing-toolpaths-complete',
+                    data: tracingResult
+                }, tracingTransferBuffers);
                 break;
 
             case 'calibrate':

@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "terrainLoad": 23.200000047683716,
+  "toolLoad": 12.600000023841858,
+  "toolpathGeneration": 11.399999976158142,
+  "totalTime": 47.200000047683716,
+  "inputPoints": 20,
+  "outputPoints": 229,
+  "densificationFactor": 11.45,
+  "zStats": {
+    "minZ": -100,
+    "maxZ": -100,
+    "avgZ": -100,
+    "range": 0
+  },
+  "allZFloor": true
+}

@@ -63,6 +63,8 @@ export let cachedToolpathPipeline = null;
 export let cachedToolpathShaderModule = null;
 export let cachedRadialBatchPipeline = null;
 export let cachedRadialBatchShaderModule = null;
+export let cachedTracingPipeline = null;
+export let cachedTracingShaderModule = null;
 
 // Constants
 export const EMPTY_CELL = -1e10;
@@ -94,6 +96,7 @@ export function round(v, d = 1) {
 const rasterizeShaderCode = 'SHADER:planar-rasterize';
 const toolpathShaderCode = 'SHADER:planar-toolpath';
 const radialRasterizeShaderCode = 'SHADER:radial-raster';
+const tracingShaderCode = 'SHADER:tracing-toolpath';
 
 // Initialize WebGPU device in worker context
 export async function initWebGPU() {
@@ -153,6 +156,15 @@ export async function initWebGPU() {
         cachedRadialBatchPipeline = device.createComputePipeline({
             layout: 'auto',
             compute: { module: cachedRadialBatchShaderModule, entryPoint: 'main' },
+        });
+
+        // Pre-compile tracing shader module
+        cachedTracingShaderModule = device.createShaderModule({ code: tracingShaderCode });
+
+        // Pre-create tracing pipeline
+        cachedTracingPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedTracingShaderModule, entryPoint: 'main' },
         });
 
         // Store device capabilities
