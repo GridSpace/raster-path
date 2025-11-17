@@ -202,6 +202,13 @@ function createWindow() {
                 console.log('  Avg Z:', avgZ.toFixed(3), 'mm');
                 console.log('  Range:', (maxZ - minZ).toFixed(3), 'mm');
 
+                // Check GPU-computed maxZ
+                console.log('\\nGPU-computed maxZ:');
+                console.log('  result.maxZ:', result.maxZ);
+                console.log('  result.maxZ[0]:', result.maxZ[0].toFixed(3), 'mm');
+                console.log('  CPU maxZ (from walking path):', maxZ.toFixed(3), 'mm');
+                console.log('  Match:', Math.abs(result.maxZ[0] - maxZ) < 0.001 ? '✓' : '✗');
+
                 // Sample and display some output points
                 console.log('\\nOutput path samples:');
                 const numSamples = Math.min(5, numOutputPoints);
@@ -254,6 +261,8 @@ function createWindow() {
                     outputPoints: numOutputPoints,
                     densificationFactor: numOutputPoints / numSegments,
                     zStats: { minZ, maxZ, avgZ, range: maxZ - minZ },
+                    gpuMaxZ: result.maxZ[0],
+                    maxZMatch: Math.abs(result.maxZ[0] - maxZ) < 0.001,
                     allZFloor: allZFloor
                 };
             })();

@@ -259,6 +259,19 @@ export async function generateTracingToolpaths({
         shouldCleanupBuffers = true;
     }
 
+    // Create maxZ buffer (one i32 per path for atomic operations)
+    // Initialize to sentinel value (bitcast of -1e30)
+    const SENTINEL_Z = -1e30;
+    const sentinelBits = new Float32Array([SENTINEL_Z]);
+    const sentinelI32 = new Int32Array(sentinelBits.buffer)[0];
+    const maxZInitData = new Int32Array(paths.length).fill(sentinelI32);
+
+    const maxZBuffer = device.createBuffer({
+        size: maxZInitData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    device.queue.writeBuffer(maxZBuffer, 0, maxZInitData);
+
     // Process each path
     const outputPaths = [];
     let totalSampledPoints = 0;
@@ -315,22 +328,20 @@ export async function generateTracingToolpaths({
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
         });
 
-        // Create uniforms
-        const uniformData = new Uint32Array([
-            terrainData.width,
-            terrainData.height,
-            sparseToolData.count,
-            numSampledPoints,
-            0, // padding for alignment
-            0, // padding for alignment
-            0, // padding for alignment
-            0, // padding for alignment
-        ]);
+        // Create uniforms (aligned to match shader struct)
+        // Struct: 5 u32s + 4 f32s = 36 bytes, padded to 48 bytes for alignment
+        const uniformData = new Uint32Array(12); // 48 bytes
+        uniformData[0] = terrainData.width;
+        uniformData[1] = terrainData.height;
+        uniformData[2] = sparseToolData.count;
+        uniformData[3] = numSampledPoints;
+        uniformData[4] = pathIdx;  // path_index for maxZ buffer indexing
+
         const uniformDataFloat = new Float32Array(uniformData.buffer);
-        uniformDataFloat[4] = terrainBounds.min.x;
-        uniformDataFloat[5] = terrainBounds.min.y;
-        uniformDataFloat[6] = gridStep;
-        uniformDataFloat[7] = zFloor;
+        uniformDataFloat[5] = terrainBounds.min.x;
+        uniformDataFloat[6] = terrainBounds.min.y;
+        uniformDataFloat[7] = gridStep;
+        uniformDataFloat[8] = zFloor;
 
         const uniformBuffer = device.createBuffer({
             size: uniformData.byteLength,
@@ -349,7 +360,8 @@ export async function generateTracingToolpaths({
                 { binding: 1, resource: { buffer: toolBuffer } },
                 { binding: 2, resource: { buffer: inputBuffer } },
                 { binding: 3, resource: { buffer: outputBuffer } },
-                { binding: 4, resource: { buffer: uniformBuffer } },
+                { binding: 4, resource: { buffer: maxZBuffer } },
+                { binding: 5, resource: { buffer: uniformBuffer } },
             ],
         });
 
@@ -414,6 +426,29 @@ export async function generateTracingToolpaths({
         }
     }
 
+    // Read back maxZ buffer
+    const maxZStagingBuffer = device.createBuffer({
+        size: maxZInitData.byteLength,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    const maxZCommandEncoder = device.createCommandEncoder();
+    maxZCommandEncoder.copyBufferToBuffer(maxZBuffer, 0, maxZStagingBuffer, 0, maxZInitData.byteLength);
+    device.queue.submit([maxZCommandEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    await maxZStagingBuffer.mapAsync(GPUMapMode.READ);
+    const maxZBitsI32 = new Int32Array(maxZStagingBuffer.getMappedRange());
+    const maxZBitsCopy = new Int32Array(maxZBitsI32);
+    maxZStagingBuffer.unmap();
+
+    // Convert i32 bits back to f32 values
+    const maxZValues = new Float32Array(maxZBitsCopy.buffer);
+
+    // Cleanup buffers
+    maxZBuffer.destroy();
+    maxZStagingBuffer.destroy();
+
     // Cleanup temporary buffers only (don't destroy cached buffers)
     if (shouldCleanupBuffers) {
         terrainBuffer.destroy();
@@ -423,9 +458,11 @@ export async function generateTracingToolpaths({
 
     const endTime = performance.now();
     debug.log(`Tracing complete: ${paths.length} paths, ${totalSampledPoints} total points in ${(endTime - startTime).toFixed(1)}ms`);
+    debug.log(`Max Z values: [${Array.from(maxZValues).map(z => z.toFixed(2)).join(', ')}]`);
 
     return {
         paths: outputPaths,
+        maxZ: Array.from(maxZValues),
         generationTime: endTime - startTime
     };
 }

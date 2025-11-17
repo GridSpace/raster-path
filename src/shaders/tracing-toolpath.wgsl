@@ -16,6 +16,7 @@ struct Uniforms {
     terrain_height: u32,
     tool_count: u32,
     point_count: u32,        // Number of sampled points to process
+    path_index: u32,         // Index of current path being processed
     terrain_min_x: f32,      // Terrain bounding box (world coordinates)
     terrain_min_y: f32,
     grid_step: f32,          // Resolution of terrain rasterization
@@ -26,7 +27,8 @@ struct Uniforms {
 @group(0) @binding(1) var<storage, read> sparse_tool: array<SparseToolPoint>;
 @group(0) @binding(2) var<storage, read> input_points: array<f32>;  // XY pairs
 @group(0) @binding(3) var<storage, read_write> output_depths: array<f32>;  // Z values
-@group(0) @binding(4) var<uniform> uniforms: Uniforms;
+@group(0) @binding(4) var<storage, read_write> max_z_buffer: array<atomic<i32>>;  // Max Z per path (as bits)
+@group(0) @binding(5) var<uniform> uniforms: Uniforms;
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -85,4 +87,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     output_depths[point_idx] = output_z;
+
+    // Update max Z for this path using atomic operation
+    // Convert float to int bits for atomic comparison
+    let z_bits = bitcast<i32>(output_z);
+    atomicMax(&max_z_buffer[uniforms.path_index], z_bits);
 }
