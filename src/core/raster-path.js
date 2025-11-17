@@ -481,8 +481,8 @@ export class RasterPath {
                     paths,
                     terrainPositions: this.terrainData.positions,
                     terrainData: {
-                        width: this.terrainData.width,
-                        height: this.terrainData.height,
+                        width: this.terrainData.gridWidth,
+                        height: this.terrainData.gridHeight,
                         bounds: this.terrainData.bounds
                     },
                     toolPositions: this.toolData.positions,

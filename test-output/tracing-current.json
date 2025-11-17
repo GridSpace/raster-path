@@ -1,17 +1,17 @@
 {
   "success": true,
-  "terrainLoad": 23,
-  "toolLoad": 10.200000047683716,
-  "toolpathGeneration": 8.399999976158142,
-  "totalTime": 41.60000002384186,
+  "terrainLoad": 24.699999928474426,
+  "toolLoad": 11.700000047683716,
+  "toolpathGeneration": 6.900000095367432,
+  "totalTime": 43.300000071525574,
   "inputPoints": 10,
   "outputPoints": 154,
   "densificationFactor": 15.4,
   "zStats": {
-    "minZ": -100,
-    "maxZ": -100,
-    "avgZ": -100,
-    "range": 0
+    "minZ": 18.93362045288086,
+    "maxZ": 19.99998664855957,
+    "avgZ": 19.8916925207361,
+    "range": 1.066366195678711
   },
-  "allZFloor": true
+  "allZFloor": false
 }
