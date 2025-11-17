@@ -327,10 +327,62 @@ export class RasterPath {
     }
 
     /**
+     * Create reusable GPU buffers for tracing mode (optimization for iterative tracing)
+     * Call this after loadTerrain() and loadTool() to cache buffers across multiple trace calls
+     * @returns {Promise<void>}
+     */
+    async createTracingBuffers() {
+        if (this.mode !== 'tracing') {
+            throw new Error('createTracingBuffers() only available in tracing mode');
+        }
+        if (!this.terrainData || !this.toolData) {
+            throw new Error('Must call loadTerrain() and loadTool() before createTracingBuffers()');
+        }
+
+        return new Promise((resolve, reject) => {
+            const handler = () => resolve();
+            this.#sendMessage(
+                'create-tracing-buffers',
+                {
+                    terrainPositions: this.terrainData.positions,
+                    toolPositions: this.toolData.positions
+                },
+                'tracing-buffers-created',
+                handler
+            );
+        });
+    }
+
+    /**
+     * Destroy reusable tracing buffers
+     * @returns {Promise<void>}
+     */
+    async destroyTracingBuffers() {
+        if (this.mode !== 'tracing') {
+            return; // No-op for non-tracing modes
+        }
+
+        return new Promise((resolve, reject) => {
+            const handler = () => resolve();
+            this.#sendMessage(
+                'destroy-tracing-buffers',
+                {},
+                'tracing-buffers-destroyed',
+                handler
+            );
+        });
+    }
+
+    /**
      * Terminate worker and cleanup resources
      */
-    terminate() {
+    async terminate() {
         if (this.worker) {
+            // Cleanup tracing buffers if in tracing mode
+            if (this.mode === 'tracing') {
+                await this.destroyTracingBuffers();
+            }
+
             this.worker.terminate();
             this.worker = null;
             this.isInitialized = false;

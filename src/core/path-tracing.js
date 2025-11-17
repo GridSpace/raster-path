@@ -50,6 +50,79 @@ import {
 import { createSparseToolFromPoints } from './raster-tool.js';
 
 /**
+ * Reusable GPU buffers for iterative tracing
+ * Stored globally in worker to be reused across multiple generateTracingToolpaths calls
+ */
+let cachedTracingBuffers = null;
+
+/**
+ * Create reusable GPU buffers for tracing (terrain and tool buffers)
+ * These persist across multiple generateTracingToolpaths calls
+ * @param {Float32Array} terrainPositions - Dense terrain Z-only grid
+ * @param {Float32Array} toolPositions - Tool points (XYZ triplets)
+ * @returns {Object} - Buffer handles and metadata
+ */
+export function createReusableTracingBuffers(terrainPositions, toolPositions) {
+    if (!isInitialized) {
+        throw new Error('WebGPU not initialized');
+    }
+
+    // Destroy existing buffers if any
+    if (cachedTracingBuffers) {
+        destroyReusableTracingBuffers();
+    }
+
+    // Create sparse tool representation
+    const sparseToolData = createSparseToolFromPoints(toolPositions);
+    debug.log(`Created reusable tracing buffers: terrain ${terrainPositions.length} floats, tool ${sparseToolData.count} points`);
+
+    // Create terrain buffer
+    const terrainBuffer = device.createBuffer({
+        size: terrainPositions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(terrainBuffer, 0, terrainPositions);
+
+    // Create tool buffer
+    const toolBufferData = new ArrayBuffer(sparseToolData.count * 16);
+    const toolBufferI32 = new Int32Array(toolBufferData);
+    const toolBufferF32 = new Float32Array(toolBufferData);
+
+    for (let i = 0; i < sparseToolData.count; i++) {
+        toolBufferI32[i * 4 + 0] = sparseToolData.xOffsets[i];
+        toolBufferI32[i * 4 + 1] = sparseToolData.yOffsets[i];
+        toolBufferF32[i * 4 + 2] = sparseToolData.zValues[i];
+        toolBufferF32[i * 4 + 3] = 0;
+    }
+
+    const toolBuffer = device.createBuffer({
+        size: toolBufferData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(toolBuffer, 0, toolBufferData);
+
+    cachedTracingBuffers = {
+        terrainBuffer,
+        toolBuffer,
+        sparseToolData
+    };
+
+    return cachedTracingBuffers;
+}
+
+/**
+ * Destroy reusable tracing buffers
+ */
+export function destroyReusableTracingBuffers() {
+    if (cachedTracingBuffers) {
+        cachedTracingBuffers.terrainBuffer.destroy();
+        cachedTracingBuffers.toolBuffer.destroy();
+        cachedTracingBuffers = null;
+        debug.log('Destroyed reusable tracing buffers');
+    }
+}
+
+/**
  * Sample a path at specified step resolution
  * @param {Float32Array} pathXY - Input path as XY coordinate pairs
  * @param {number} step - Maximum distance between sampled points (world units)
@@ -139,37 +212,52 @@ export async function generateTracingToolpaths({
         }
     }
 
-    // Create sparse tool representation (reuse for all paths)
-    const sparseToolData = createSparseToolFromPoints(toolPositions);
-    debug.log(`Created sparse tool: ${sparseToolData.count} points`);
+    // Use cached buffers if available, otherwise create them for this call
+    let terrainBuffer, toolBuffer, sparseToolData;
+    let shouldCleanupBuffers = false;
 
-    // Create terrain buffer (shared across all paths)
-    const terrainBuffer = device.createBuffer({
-        size: terrainPositions.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(terrainBuffer, 0, terrainPositions);
+    if (cachedTracingBuffers) {
+        // Reuse existing buffers (optimized for iterative tracing)
+        debug.log('Using cached tracing buffers');
+        terrainBuffer = cachedTracingBuffers.terrainBuffer;
+        toolBuffer = cachedTracingBuffers.toolBuffer;
+        sparseToolData = cachedTracingBuffers.sparseToolData;
+    } else {
+        // Create temporary buffers (will be cleaned up at end)
+        debug.log('Creating temporary tracing buffers');
+        sparseToolData = createSparseToolFromPoints(toolPositions);
+        debug.log(`Created sparse tool: ${sparseToolData.count} points`);
 
-    // Create tool buffer (shared across all paths)
-    const toolBufferData = new ArrayBuffer(sparseToolData.count * 16);
-    const toolBufferI32 = new Int32Array(toolBufferData);
-    const toolBufferF32 = new Float32Array(toolBufferData);
+        // Create terrain buffer
+        terrainBuffer = device.createBuffer({
+            size: terrainPositions.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(terrainBuffer, 0, terrainPositions);
 
-    for (let i = 0; i < sparseToolData.count; i++) {
-        toolBufferI32[i * 4 + 0] = sparseToolData.xOffsets[i];
-        toolBufferI32[i * 4 + 1] = sparseToolData.yOffsets[i];
-        toolBufferF32[i * 4 + 2] = sparseToolData.zValues[i];
-        toolBufferF32[i * 4 + 3] = 0;
+        // Create tool buffer
+        const toolBufferData = new ArrayBuffer(sparseToolData.count * 16);
+        const toolBufferI32 = new Int32Array(toolBufferData);
+        const toolBufferF32 = new Float32Array(toolBufferData);
+
+        for (let i = 0; i < sparseToolData.count; i++) {
+            toolBufferI32[i * 4 + 0] = sparseToolData.xOffsets[i];
+            toolBufferI32[i * 4 + 1] = sparseToolData.yOffsets[i];
+            toolBufferF32[i * 4 + 2] = sparseToolData.zValues[i];
+            toolBufferF32[i * 4 + 3] = 0;
+        }
+
+        toolBuffer = device.createBuffer({
+            size: toolBufferData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(toolBuffer, 0, toolBufferData);
+
+        // Wait for buffer uploads to complete
+        await device.queue.onSubmittedWorkDone();
+
+        shouldCleanupBuffers = true;
     }
-
-    const toolBuffer = device.createBuffer({
-        size: toolBufferData.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(toolBuffer, 0, toolBufferData);
-
-    // Wait for buffer uploads to complete
-    await device.queue.onSubmittedWorkDone();
 
     // Process each path
     const outputPaths = [];
@@ -187,6 +275,14 @@ export async function generateTracingToolpaths({
         totalSampledPoints += numSampledPoints;
 
         debug.log(`  Sampled to ${numSampledPoints} points`);
+
+        // Debug: Log first sampled point and its grid coordinates
+        const firstX = sampledPath[0];
+        const firstY = sampledPath[1];
+        const gridX = (firstX - terrainBounds.min.x) / gridStep;
+        const gridY = (firstY - terrainBounds.min.y) / gridStep;
+        debug.log(`  First point: world(${firstX.toFixed(2)}, ${firstY.toFixed(2)}) -> grid(${gridX.toFixed(2)}, ${gridY.toFixed(2)})`);
+        debug.log(`  Terrain: ${terrainData.width}x${terrainData.height}, bounds: (${terrainBounds.min.x.toFixed(2)}, ${terrainBounds.min.y.toFixed(2)}) to (${terrainBounds.max.x.toFixed(2)}, ${terrainBounds.max.y.toFixed(2)})`);
 
         // Check GPU memory limits
         const inputBufferSize = sampledPath.byteLength;
@@ -318,9 +414,12 @@ export async function generateTracingToolpaths({
         }
     }
 
-    // Cleanup shared buffers
-    terrainBuffer.destroy();
-    toolBuffer.destroy();
+    // Cleanup temporary buffers only (don't destroy cached buffers)
+    if (shouldCleanupBuffers) {
+        terrainBuffer.destroy();
+        toolBuffer.destroy();
+        debug.log('Cleaned up temporary tracing buffers');
+    }
 
     const endTime = performance.now();
     debug.log(`Tracing complete: ${paths.length} paths, ${totalSampledPoints} total points in ${(endTime - startTime).toFixed(1)}ms`);

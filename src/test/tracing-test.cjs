@@ -93,19 +93,21 @@ function createWindow() {
                     'X:', minX.toFixed(2), 'to', maxX.toFixed(2),
                     'Y:', minY.toFixed(2), 'to', maxY.toFixed(2));
 
-                // Generate a 45-degree diagonal path across the terrain
-                const pathLength = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2);
-                const numSegments = 20; // Intentionally sparse to test densification
+                // Generate a simple horizontal scanline across the terrain center
+                const centerY = (minY + maxY) / 2;
+                const numSegments = 10; // Sparse to test densification
                 const path1 = new Float32Array(numSegments * 2);
 
-                console.log('\\nGenerating 45° diagonal test path...');
+                console.log('\\nGenerating horizontal scanline test path...');
+                console.log('  Y (fixed):', centerY.toFixed(2), 'mm');
+                console.log('  X range:', minX.toFixed(2), 'to', maxX.toFixed(2), 'mm');
+
                 for (let i = 0; i < numSegments; i++) {
                     const t = i / (numSegments - 1);
-                    path1[i * 2] = minX + t * (maxX - minX);      // X
-                    path1[i * 2 + 1] = minY + t * (maxY - minY);  // Y
+                    path1[i * 2] = minX + t * (maxX - minX);      // X varies
+                    path1[i * 2 + 1] = centerY;                    // Y constant
                 }
                 console.log('✓ Generated path with', numSegments, 'vertices');
-                console.log('  Path length:', pathLength.toFixed(2), 'mm');
 
                 // Test parameters
                 const resolution = 0.1; // 0.1mm resolution for terrain raster
@@ -143,6 +145,23 @@ function createWindow() {
                 const terrainTime = performance.now() - terrainStartTime;
                 console.log('✓ Terrain loaded in', terrainTime.toFixed(1), 'ms');
                 console.log('  Grid:', terrainData.width, 'x', terrainData.height);
+
+                // Check terrain data has actual values
+                const terrainSamples = [];
+                for (let i = 0; i < Math.min(10, terrainData.positions.length); i++) {
+                    terrainSamples.push(terrainData.positions[i].toFixed(3));
+                }
+                console.log('  Terrain Z samples:', terrainSamples.join(', '));
+                const nonEmpty = terrainData.positions.filter(z => z > -1e9).length;
+                console.log('  Non-empty terrain cells:', nonEmpty, '/', terrainData.positions.length,
+                           '(' + (100 * nonEmpty / terrainData.positions.length).toFixed(1) + '%)');
+
+                // Create reusable buffers for optimal iterative tracing
+                console.log('\\nCreating reusable tracing buffers...');
+                const buffersStartTime = performance.now();
+                await raster.createTracingBuffers();
+                const buffersTime = performance.now() - buffersStartTime;
+                console.log('✓ Reusable buffers created in', buffersTime.toFixed(1), 'ms');
 
                 // Generate traced toolpaths
                 console.log('\\nGenerating traced toolpaths...');
