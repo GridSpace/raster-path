@@ -45,7 +45,7 @@
 /**
  * Configuration options for RasterPath
  * @typedef {Object} RasterPathConfig
- * @property {'planar'|'radial'} mode - Rasterization mode (default: 'planar')
+ * @property {'planar'|'radial'|'tracing'} mode - Rasterization mode (default: 'planar')
  * @property {boolean} autoTiling - Automatically tile large datasets (default: true)
  * @property {number} gpuMemorySafetyMargin - Safety margin as percentage (default: 0.8 = 80%)
  * @property {number} maxGPUMemoryMB - Maximum GPU memory per tile (default: 256MB)
@@ -80,8 +80,8 @@ export class RasterPath {
 
         // Validate mode
         const mode = config.mode || 'planar';
-        if (mode !== 'planar' && mode !== 'radial') {
-            throw new Error(`Invalid mode: ${mode}. Must be 'planar' or 'radial'`);
+        if (mode !== 'planar' && mode !== 'radial' && mode !== 'tracing') {
+            throw new Error(`Invalid mode: ${mode}. Must be 'planar', 'radial', or 'tracing'`);
         }
 
         // Validate rotationStep for radial mode
@@ -221,8 +221,8 @@ export class RasterPath {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
 
-        if (this.mode === 'planar') {
-            // Planar: rasterize and return
+        if (this.mode === 'planar' || this.mode === 'tracing') {
+            // Planar/Tracing: rasterize and return (tracing reuses planar terrain rasterization)
             const terrainData = await this.#rasterizePlanar({ triangles, zFloor, boundsOverride, isForTool: false, onProgress });
             this.terrainData = terrainData;
             return terrainData;
@@ -269,7 +269,7 @@ export class RasterPath {
      * @param {function} params.onProgress - Optional progress callback (progress: number, info?: string) => void
      * @returns {Promise<object>} Planar: {pathData, width, height} | Radial: {strips[], numStrips, totalPoints}
      */
-    async generateToolpaths({ xStep, yStep, zFloor, onProgress }) {
+    async generateToolpaths({ xStep, yStep, zFloor, onProgress, paths, step }) {
         if (!this.isInitialized) {
             throw new Error('RasterPath not initialized. Call init() first.');
         }
@@ -278,7 +278,7 @@ export class RasterPath {
             throw new Error('Tool not loaded. Call loadTool() first.');
         }
 
-        debug.log('gen.paths', { xStep, yStep, zFloor });
+        debug.log('gen.paths', { xStep, yStep, zFloor, paths: paths?.length, step });
 
         if (this.mode === 'planar') {
             if (!this.terrainData) {
@@ -292,7 +292,7 @@ export class RasterPath {
                 zFloor,
                 onProgress
             });
-        } else {
+        } else if (this.mode === 'radial') {
             // Radial mode: use stored triangles
             if (!this.terrainTriangles) {
                 throw new Error('Terrain not loaded. Call loadTerrain() first.');
@@ -306,14 +306,83 @@ export class RasterPath {
                 zFloor: zFloor ?? this.terrainZFloor,
                 onProgress
             });
+        } else if (this.mode === 'tracing') {
+            // Tracing mode: follow input paths
+            if (!this.terrainData) {
+                throw new Error('Terrain not loaded. Call loadTerrain() first.');
+            }
+            if (!paths || paths.length === 0) {
+                throw new Error('Tracing mode requires paths parameter (array of Float32Array XY coordinates)');
+            }
+            if (!step || step <= 0) {
+                throw new Error('Tracing mode requires step parameter (sampling resolution in world units)');
+            }
+            return this.#generateToolpathsTracing({
+                paths,
+                step,
+                zFloor,
+                onProgress
+            });
         }
+    }
+
+    /**
+     * Create reusable GPU buffers for tracing mode (optimization for iterative tracing)
+     * Call this after loadTerrain() and loadTool() to cache buffers across multiple trace calls
+     * @returns {Promise<void>}
+     */
+    async createTracingBuffers() {
+        if (this.mode !== 'tracing') {
+            throw new Error('createTracingBuffers() only available in tracing mode');
+        }
+        if (!this.terrainData || !this.toolData) {
+            throw new Error('Must call loadTerrain() and loadTool() before createTracingBuffers()');
+        }
+
+        return new Promise((resolve, reject) => {
+            const handler = () => resolve();
+            this.#sendMessage(
+                'create-tracing-buffers',
+                {
+                    terrainPositions: this.terrainData.positions,
+                    toolPositions: this.toolData.positions
+                },
+                'tracing-buffers-created',
+                handler
+            );
+        });
+    }
+
+    /**
+     * Destroy reusable tracing buffers
+     * @returns {Promise<void>}
+     */
+    async destroyTracingBuffers() {
+        if (this.mode !== 'tracing') {
+            return; // No-op for non-tracing modes
+        }
+
+        return new Promise((resolve, reject) => {
+            const handler = () => resolve();
+            this.#sendMessage(
+                'destroy-tracing-buffers',
+                {},
+                'tracing-buffers-destroyed',
+                handler
+            );
+        });
     }
 
     /**
      * Terminate worker and cleanup resources
      */
-    terminate() {
+    async terminate() {
         if (this.worker) {
+            // Cleanup tracing buffers if in tracing mode
+            if (this.mode === 'tracing') {
+                await this.destroyTracingBuffers();
+            }
+
             this.worker.terminate();
             this.worker = null;
             this.isInitialized = false;
@@ -383,6 +452,46 @@ export class RasterPath {
                     singleScanline
                 },
                 'toolpath-complete',
+                handler
+            );
+        });
+    }
+
+    async #generateToolpathsTracing({ paths, step, zFloor, onProgress }) {
+        return new Promise((resolve, reject) => {
+            // Set up progress handler if callback provided
+            if (onProgress) {
+                const progressHandler = (data) => {
+                    onProgress(data.percent, { current: data.current, total: data.total, pathIndex: data.pathIndex });
+                };
+                this.messageHandlers.set('tracing-progress', progressHandler);
+            }
+
+            const handler = (data) => {
+                // Clean up progress handler
+                if (onProgress) {
+                    this.messageHandlers.delete('tracing-progress');
+                }
+                resolve(data);
+            };
+
+            this.#sendMessage(
+                'tracing-generate-toolpaths',
+                {
+                    paths,
+                    terrainPositions: this.terrainData.positions,
+                    terrainData: {
+                        width: this.terrainData.gridWidth,
+                        height: this.terrainData.gridHeight,
+                        bounds: this.terrainData.bounds
+                    },
+                    toolPositions: this.toolData.positions,
+                    step,
+                    gridStep: this.resolution,
+                    terrainBounds: this.terrainData.bounds,
+                    zFloor: zFloor ?? 0
+                },
+                'tracing-toolpaths-complete',
                 handler
             );
         });

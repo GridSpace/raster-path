@@ -12,6 +12,7 @@ let zFloor = -100;
 let xStep = 5;
 let yStep = 5;
 let angleStep = 1.0; // degrees
+let traceStep = 0.5; // mm - sampling resolution for tracing mode
 let toolSize = 2.5; // mm - target tool diameter
 
 let modelSTL = null;  // ArrayBuffer (current, possibly rotated)
@@ -61,6 +62,7 @@ function saveParameters() {
     localStorage.setItem('raster-xStep', xStep);
     localStorage.setItem('raster-yStep', yStep);
     localStorage.setItem('raster-angleStep', angleStep);
+    localStorage.setItem('raster-traceStep', traceStep);
     localStorage.setItem('raster-toolSize', toolSize);
     console.log(`[App] Saved tool size: ${toolSize}mm`);
 
@@ -125,6 +127,12 @@ function loadParameters() {
     if (savedAngleStep !== null) {
         angleStep = parseFloat(savedAngleStep);
         document.getElementById('angle-step').value = angleStep;
+    }
+
+    const savedTraceStep = localStorage.getItem('raster-traceStep');
+    if (savedTraceStep !== null) {
+        traceStep = parseFloat(savedTraceStep);
+        document.getElementById('trace-step').value = traceStep;
     }
 
     const savedToolSize = localStorage.getItem('raster-toolSize');
@@ -545,8 +553,8 @@ async function rasterizeAll() {
             updateInfo(`Tool loaded in ${(t1 - t0).toFixed(0)}ms`);
         }
 
-        if (mode === 'planar') {
-            // Planar mode: rasterize terrain immediately
+        if (mode === 'planar' || mode === 'tracing') {
+            // Planar/Tracing mode: rasterize terrain immediately
             if (modelTriangles) {
                 updateInfo('Rasterizing terrain...');
                 const t0 = performance.now();
@@ -557,7 +565,7 @@ async function rasterizeAll() {
                 const t1 = performance.now();
                 updateInfo(`Terrain rasterized in ${(t1 - t0).toFixed(0)}ms`);
             }
-        } else {
+        } else if (mode === 'radial') {
             // Radial mode: MUST load tool FIRST
             if (!toolTriangles) {
                 updateInfo('Error: Radial mode requires tool to be loaded first');
@@ -608,10 +616,16 @@ async function generateToolpath() {
             updateInfo('Model must be rasterized first');
             return;
         }
-    } else {
+    } else if (mode === 'radial') {
         // Radial mode: terrain must be loaded (stored internally)
         if (!modelTriangles) {
             updateInfo('Model STL must be loaded');
+            return;
+        }
+    } else if (mode === 'tracing') {
+        // Tracing mode: terrain must be rasterized
+        if (!modelRasterData) {
+            updateInfo('Model must be rasterized first');
             return;
         }
     }
@@ -620,18 +634,63 @@ async function generateToolpath() {
         const t0 = performance.now();
         updateInfo('Generating toolpath...');
 
-        // Unified API - works for both modes!
-        toolpathData = await rasterPath.generateToolpaths({
-            xStep: xStep,
-            yStep: yStep,
+        // Generate trace paths for tracing mode
+        let tracePaths = null;
+        if (mode === 'tracing') {
+            // Get model bounds from raster data
+            const bounds = modelRasterData.bounds;
+            const minX = bounds.min.x;
+            const maxX = bounds.max.x;
+            const minY = bounds.min.y;
+            const maxY = bounds.max.y;
+
+            // Create two cross paths: horizontal through center, vertical through center
+            const centerY = (minY + maxY) / 2;
+            const centerX = (minX + maxX) / 2;
+
+            tracePaths = [
+                new Float32Array([minX, centerY, maxX, centerY]),  // Horizontal line
+                new Float32Array([centerX, minY, centerX, maxY])   // Vertical line
+            ];
+
+            debug.log(`Generated trace paths: H(${minX.toFixed(2)}, ${centerY.toFixed(2)}) to (${maxX.toFixed(2)}, ${centerY.toFixed(2)})`);
+            debug.log(`                        V(${centerX.toFixed(2)}, ${minY.toFixed(2)}) to (${centerX.toFixed(2)}, ${maxY.toFixed(2)})`);
+        }
+
+        // Unified API - works for all modes!
+        const generateParams = {
             zFloor: zFloor
-        });
+        };
+
+        if (mode === 'tracing') {
+            generateParams.paths = tracePaths;
+            generateParams.step = traceStep;
+        } else {
+            generateParams.xStep = xStep;
+            generateParams.yStep = yStep;
+        }
+
+        toolpathData = await rasterPath.generateToolpaths(generateParams);
 
         const t1 = performance.now();
 
         if (mode === 'planar') {
             const numPoints = toolpathData.pathData.length;
             updateInfo(`Toolpath generated: ${numPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
+        } else if (mode === 'tracing') {
+            const totalPoints = toolpathData.paths.reduce((sum, path) => sum + path.length / 3, 0);
+            debug.log(`[Tracing] Generated ${toolpathData.paths.length} paths with ${totalPoints} total points`);
+
+            // Log sample Z values from each path
+            toolpathData.paths.forEach((path, idx) => {
+                const zValues = [];
+                for (let i = 2; i < Math.min(path.length, 15); i += 3) {
+                    zValues.push(path[i].toFixed(2));
+                }
+                debug.log(`[Tracing] Path ${idx} Z samples:`, zValues.join(', '));
+            });
+
+            updateInfo(`Toolpath generated: ${toolpathData.paths.length} paths, ${totalPoints.toLocaleString()} points in ${(t1 - t0).toFixed(0)}ms`);
         } else {
             // debug.log('[Radial] Toolpaths generated:', toolpathData);
             debug.log(`[Radial] Received ${toolpathData.strips.length} strips from worker, numStrips=${toolpathData.numStrips}`);
@@ -901,8 +960,8 @@ function displayModelRaster(wrapped) {
     const positions = [];
     const colors = [];
 
-    if (mode === 'planar') {
-        // Planar: terrain is dense (Z-only array)
+    if (mode === 'planar' || mode === 'tracing') {
+        // Planar/Tracing: terrain is dense (Z-only array)
         const { positions: rasterPos, bounds, gridWidth, gridHeight } = modelRasterData;
         const stepSize = resolution;
 
@@ -1055,6 +1114,59 @@ function displayToolRaster() {
 function displayToolpaths(wrapped) {
     if (!toolpathData) {
         return;
+    }
+
+    if (mode === 'tracing') {
+        // Tracing toolpaths - array of XYZ paths
+        const { paths } = toolpathData;
+
+        // Calculate total points
+        let totalPoints = 0;
+        for (const path of paths) {
+            totalPoints += path.length / 3;
+        }
+
+        debug.log('[Toolpath Display] Tracing mode:', paths.length, 'paths,', totalPoints, 'total points');
+
+        // Preallocate typed arrays
+        const positions = new Float32Array(totalPoints * 3);
+        const colors = new Float32Array(totalPoints * 3);
+
+        let arrayIdx = 0;
+        for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
+            const path = paths[pathIdx];
+            const numPoints = path.length / 3;
+
+            // Use different colors for each path
+            const color = pathIdx === 0 ? [1, 0.4, 0] : [0, 0.8, 1]; // Orange for horizontal, cyan for vertical
+
+            for (let i = 0; i < numPoints; i++) {
+                positions[arrayIdx] = path[i * 3];       // X
+                positions[arrayIdx + 1] = path[i * 3 + 1]; // Y
+                positions[arrayIdx + 2] = path[i * 3 + 2]; // Z
+
+                colors[arrayIdx] = color[0];
+                colors[arrayIdx + 1] = color[1];
+                colors[arrayIdx + 2] = color[2];
+
+                arrayIdx += 3;
+            }
+        }
+
+        // Create geometry
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: resolution * 1.5,
+            vertexColors: true
+        });
+
+        toolpathPoints = new THREE.Points(geometry, material);
+        rotatedGroup.add(toolpathPoints);
+
+        return; // Exit early for tracing mode
     }
 
     if (mode === 'planar') {
@@ -1324,15 +1436,32 @@ function updateButtonStates() {
 // ============================================================================
 
 function updateModeUI() {
-    // Show/hide wrapped toggle and angle step for radial mode
+    // Show/hide mode-specific controls
     const wrappedContainer = document.getElementById('wrapped-container').classList;
     const angleStepContainer = document.getElementById('angle-step-container').classList;
+    const traceStepContainer = document.getElementById('trace-step-container').classList;
+    const xStepContainer = document.getElementById('x-step-container').classList;
+    const yStepContainer = document.getElementById('y-step-container').classList;
+
     if (mode === 'radial') {
         wrappedContainer.remove('hide');
         angleStepContainer.remove('hide');
-    } else {
+        traceStepContainer.add('hide');
+        xStepContainer.remove('hide');
+        yStepContainer.remove('hide');
+    } else if (mode === 'tracing') {
         wrappedContainer.add('hide');
         angleStepContainer.add('hide');
+        traceStepContainer.remove('hide');
+        xStepContainer.add('hide');
+        yStepContainer.add('hide');
+    } else {
+        // planar
+        wrappedContainer.add('hide');
+        angleStepContainer.add('hide');
+        traceStepContainer.add('hide');
+        xStepContainer.remove('hide');
+        yStepContainer.remove('hide');
     }
 }
 
@@ -1449,6 +1578,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         saveParameters();
         updateInfo(`Angle Step changed to ${angleStep}°`);
+        updateButtonStates();
+    });
+
+    document.getElementById('trace-step').addEventListener('change', (e) => {
+        traceStep = parseFloat(e.target.value);
+        if (mode === 'tracing') {
+            toolpathData = null;  // Need to regenerate toolpath
+        }
+        saveParameters();
+        updateInfo(`Trace Step changed to ${traceStep}mm`);
         updateButtonStates();
     });
 
