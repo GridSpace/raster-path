@@ -65,6 +65,12 @@ export let cachedRadialBatchPipeline = null;
 export let cachedRadialBatchShaderModule = null;
 export let cachedTracingPipeline = null;
 export let cachedTracingShaderModule = null;
+export let cachedRadialV3RotatePipeline = null;
+export let cachedRadialV3RotateShaderModule = null;
+export let cachedRadialV3RasterizePipeline = null;
+export let cachedRadialV3RasterizeShaderModule = null;
+export let cachedRadialV3BatchedRasterizePipeline = null;
+export let cachedRadialV3BatchedRasterizeShaderModule = null;
 
 // Constants
 export const EMPTY_CELL = -1e10;
@@ -97,6 +103,9 @@ const rasterizeShaderCode = 'SHADER:planar-rasterize';
 const toolpathShaderCode = 'SHADER:planar-toolpath';
 const radialRasterizeShaderCode = 'SHADER:radial-raster';
 const tracingShaderCode = 'SHADER:tracing-toolpath';
+const radialV3RotateShaderCode = 'SHADER:radial-rotate-triangles';
+const radialV3RasterizeShaderCode = 'SHADER:radial-rasterize-filtered';
+const radialV3BatchedRasterizeShaderCode = 'SHADER:radial-rasterize-batched';
 
 // Initialize WebGPU device in worker context
 export async function initWebGPU() {
@@ -165,6 +174,33 @@ export async function initWebGPU() {
         cachedTracingPipeline = device.createComputePipeline({
             layout: 'auto',
             compute: { module: cachedTracingShaderModule, entryPoint: 'main' },
+        });
+
+        // Pre-compile radial V3 rotate shader module
+        cachedRadialV3RotateShaderModule = device.createShaderModule({ code: radialV3RotateShaderCode });
+
+        // Pre-create radial V3 rotate pipeline
+        cachedRadialV3RotatePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedRadialV3RotateShaderModule, entryPoint: 'main' },
+        });
+
+        // Pre-compile radial V3 rasterize shader module
+        cachedRadialV3RasterizeShaderModule = device.createShaderModule({ code: radialV3RasterizeShaderCode });
+
+        // Pre-create radial V3 rasterize pipeline
+        cachedRadialV3RasterizePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedRadialV3RasterizeShaderModule, entryPoint: 'main' },
+        });
+
+        // Pre-compile radial V3 batched rasterize shader module
+        cachedRadialV3BatchedRasterizeShaderModule = device.createShaderModule({ code: radialV3BatchedRasterizeShaderCode });
+
+        // Pre-create radial V3 batched rasterize pipeline
+        cachedRadialV3BatchedRasterizePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedRadialV3BatchedRasterizeShaderModule, entryPoint: 'main' },
         });
 
         // Store device capabilities

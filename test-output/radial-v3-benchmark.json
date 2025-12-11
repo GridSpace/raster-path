@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "results": [
+    {
+      "version": "V2 (current)",
+      "duration": 1155.7000000476837,
+      "strips": 180,
+      "totalPoints": 2700
+    },
+    {
+      "version": "V3 (rotate-filter)",
+      "duration": 2264.5999999046326,
+      "strips": 180,
+      "totalPoints": 2700
+    }
+  ],
+  "speedup": 0.5103329506740055
+}

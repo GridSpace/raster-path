@@ -111,6 +111,7 @@ export class RasterPath {
             gpuMemorySafetyMargin: config.gpuMemorySafetyMargin ?? 0.8,
             autoTiling: config.autoTiling ?? true,
             batchDivisor: config.batchDivisor ?? 1, // For testing batching overhead
+            radialV3: config.radialV3 ?? false, // Use radial V3 pipeline (rotate-filter-toolpath)
             debug: config.debug,
             quiet: config.quiet
         };
@@ -531,9 +532,13 @@ export class RasterPath {
                 resolve(data);
             };
 
-            // Send entire pipeline to worker
+            // Send entire pipeline to worker (use V3 if configured)
+            const messageType = this.config.radialV3
+                ? 'radial-generate-toolpaths-v3'
+                : 'radial-generate-toolpaths';
+
             this.#sendMessage(
-                'radial-generate-toolpaths',
+                messageType,
                 {
                     triangles: triangles,
                     bucketData,

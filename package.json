@@ -45,6 +45,7 @@
     "test:lathe-cylinder-2-debug": "npm run build && npx electron src/test/lathe-cylinder-2-debug.cjs",
     "test:extreme-work": "npm run build && npx electron src/test/extreme-work-test.cjs",
     "test:radial-thread-limit": "npm run build && npx electron src/test/radial-thread-limit-test.cjs",
+    "test:radial-v3": "npm run build && npx electron src/test/radial-v3-benchmark.cjs",
     "test:tracing": "npm run build && npx electron src/test/tracing-test.cjs"
   },
   "keywords": [

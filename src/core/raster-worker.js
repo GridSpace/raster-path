@@ -54,6 +54,7 @@ import { initWebGPU, setConfig, updateConfig, deviceCapabilities, debug, device 
 import { rasterizeMesh } from './raster-planar.js';
 import { generateToolpath } from './path-planar.js';
 import { generateRadialToolpaths } from './path-radial.js';
+import { generateRadialToolpathsV3 } from './path-radial-v3.js';
 import { generateTracingToolpaths, createReusableTracingBuffers, destroyReusableTracingBuffers } from './path-tracing.js';
 import { calibrateGPU } from './workload-calibrate.js';
 
@@ -126,6 +127,15 @@ self.onmessage = async function(e) {
                     type: 'radial-toolpaths-complete',
                     data: radialToolpathResult
                 }, toolpathTransferBuffers);
+                break;
+
+            case 'radial-generate-toolpaths-v3':
+                const radialV3ToolpathResult = await generateRadialToolpathsV3(data);
+                const v3ToolpathTransferBuffers = radialV3ToolpathResult.strips.map(strip => strip.pathData.buffer);
+                self.postMessage({
+                    type: 'radial-toolpaths-complete',
+                    data: radialV3ToolpathResult
+                }, v3ToolpathTransferBuffers);
                 break;
 
             case 'tracing-generate-toolpaths':

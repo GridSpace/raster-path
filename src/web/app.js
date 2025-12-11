@@ -71,6 +71,12 @@ function saveParameters() {
     if (showWrappedCheckbox) {
         localStorage.setItem('raster-showWrapped', showWrappedCheckbox.checked);
     }
+
+    // Save radial V3 checkbox
+    const radialV3Checkbox = document.getElementById('radial-v3');
+    if (radialV3Checkbox) {
+        localStorage.setItem('raster-radialV3', radialV3Checkbox.checked);
+    }
 }
 
 function loadParameters() {
@@ -151,6 +157,15 @@ function loadParameters() {
         const showWrappedCheckbox = document.getElementById('show-wrapped');
         if (showWrappedCheckbox) {
             showWrappedCheckbox.checked = savedShowWrapped === 'true';
+        }
+    }
+
+    // Restore radial V3 checkbox
+    const savedRadialV3 = localStorage.getItem('raster-radialV3');
+    if (savedRadialV3 !== null) {
+        const radialV3Checkbox = document.getElementById('radial-v3');
+        if (radialV3Checkbox) {
+            radialV3Checkbox.checked = savedRadialV3 === 'true';
         }
     }
 }
@@ -521,10 +536,14 @@ async function initRasterPath() {
         rasterPath.terminate();
     }
 
+    const radialV3Checkbox = document.getElementById('radial-v3');
+    const useRadialV3 = mode === 'radial' && radialV3Checkbox && radialV3Checkbox.checked;
+
     rasterPath = new RasterPath({
         mode: mode,
         resolution: resolution,
         rotationStep: mode === 'radial' ? angleStep : undefined,
+        radialV3: useRadialV3,
         batchDivisor: 5,
         debug: true
     });
@@ -1442,6 +1461,7 @@ function updateModeUI() {
     const traceStepContainer = document.getElementById('trace-step-container').classList;
     const xStepContainer = document.getElementById('x-step-container').classList;
     const yStepContainer = document.getElementById('y-step-container').classList;
+    const radialV3Container = document.getElementById('radial-v3-container').classList;
 
     if (mode === 'radial') {
         wrappedContainer.remove('hide');
@@ -1449,6 +1469,7 @@ function updateModeUI() {
         traceStepContainer.add('hide');
         xStepContainer.remove('hide');
         yStepContainer.remove('hide');
+        radialV3Container.remove('hide');
     } else if (mode === 'tracing') {
         wrappedContainer.add('hide');
         angleStepContainer.add('hide');
@@ -1460,6 +1481,7 @@ function updateModeUI() {
         wrappedContainer.add('hide');
         angleStepContainer.add('hide');
         traceStepContainer.add('hide');
+        radialV3Container.add('hide');
         xStepContainer.remove('hide');
         yStepContainer.remove('hide');
     }
@@ -1575,6 +1597,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             modelRasterData = null;  // Need to re-rasterize with new angle step
             toolRasterData = null;
             toolpathData = null;
+            initRasterPath();  // Reinit with new angle step
         }
         saveParameters();
         updateInfo(`Angle Step changed to ${angleStep}°`);
@@ -1588,6 +1611,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         saveParameters();
         updateInfo(`Trace Step changed to ${traceStep}mm`);
+        updateButtonStates();
+    });
+
+    document.getElementById('radial-v3').addEventListener('change', (e) => {
+        if (mode === 'radial') {
+            modelRasterData = null;  // Need to re-rasterize with different algorithm
+            toolRasterData = null;
+            toolpathData = null;
+            initRasterPath();  // Reinit with V3 setting
+        }
+        saveParameters();
+        const v3Status = e.target.checked ? 'V3 (experimental)' : 'V2 (default)';
+        updateInfo(`Radial algorithm: ${v3Status}`);
         updateButtonStates();
     });
 
