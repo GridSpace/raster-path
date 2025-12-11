@@ -24,13 +24,25 @@
  * - Immediate toolpath generation: No need to store all strips
  * - Better cache locality: Process bucket completely before moving on
  *
+ * TODO: Memory Safety
+ * ───────────────────
+ * V3 currently does NOT have memory safety checks like V2 does. V2 batches angles
+ * if total memory (numAngles × gridWidth × gridHeight × 4) exceeds 1800MB.
+ *
+ * V3 processes one angle at a time (inherently lower memory), but doesn't check if:
+ *   - Triangle input buffer (triangles.byteLength) exceeds GPU limits
+ *   - Rotated triangles buffer (numTriangles × 11 × 4) exceeds GPU limits
+ *   - Output raster buffer (fullGridWidth × gridHeight × 4) exceeds GPU limits
+ *
+ * This could cause crashes on extremely large models with millions of triangles.
+ * Consider adding checks and batching for triangle buffers if needed.
+ *
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
 import {
     device, config, debug, diagnostic,
     cachedRadialV3RotatePipeline,
-    cachedRadialV3RasterizePipeline,
     cachedRadialV3BatchedRasterizePipeline
 } from './raster-config.js';
 import {
@@ -237,116 +249,6 @@ async function rasterizeAllBuckets({
 
     return terrainData;
 }
-
-/**
- * Rasterize a bucket using specific triangle indices from the full rotated buffer
- */
-async function rasterizeStripWithIndices({
-    rotatedTrianglesBuffer,
-    triangleIndices,
-    resolution,
-    toolRadius,
-    gridWidth,
-    gridHeight,
-    bucketMinX,
-    bucketMinY,
-    zFloor
-}) {
-    const rasterizePipeline = cachedRadialV3RasterizePipeline;
-    if (!rasterizePipeline) {
-        throw new Error('Radial V3 pipelines not initialized');
-    }
-
-    // Create triangle indices buffer
-    const indicesBuffer = device.createBuffer({
-        size: triangleIndices.length * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-    new Uint32Array(indicesBuffer.getMappedRange()).set(triangleIndices);
-    indicesBuffer.unmap();
-
-    // Create output buffer for terrain strip
-    const outputSize = gridWidth * gridHeight * 4;
-    const outputBuffer = device.createBuffer({
-        size: outputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-    });
-
-    // Initialize with zFloor
-    const initData = new Float32Array(gridWidth * gridHeight);
-    initData.fill(zFloor);
-    device.queue.writeBuffer(outputBuffer, 0, initData);
-
-    // Create uniforms
-    const uniformBuffer = device.createBuffer({
-        size: 36,  // 9 fields × 4 bytes
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        mappedAtCreation: true
-    });
-
-    const uniformView = new ArrayBuffer(36);
-    const floatView = new Float32Array(uniformView);
-    const uintView = new Uint32Array(uniformView);
-
-    floatView[0] = resolution;
-    floatView[1] = toolRadius;
-    uintView[2] = gridWidth;
-    uintView[3] = gridHeight;
-    floatView[4] = bucketMinX;
-    floatView[5] = bucketMinY;
-    floatView[6] = zFloor;
-    uintView[7] = triangleIndices.length;  // number of triangles in this bucket
-    uintView[8] = 0;  // padding for alignment
-
-    new Uint8Array(uniformBuffer.getMappedRange()).set(new Uint8Array(uniformView));
-    uniformBuffer.unmap();
-
-    // Create bind group
-    const bindGroup = device.createBindGroup({
-        layout: rasterizePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: rotatedTrianglesBuffer } },
-            { binding: 1, resource: { buffer: outputBuffer } },
-            { binding: 2, resource: { buffer: uniformBuffer } },
-            { binding: 3, resource: { buffer: indicesBuffer } }
-        ]
-    });
-
-    // Dispatch
-    const commandEncoder = device.createCommandEncoder();
-    const passEncoder = commandEncoder.beginComputePass();
-    passEncoder.setPipeline(rasterizePipeline);
-    passEncoder.setBindGroup(0, bindGroup);
-
-    const dispatchX = Math.ceil(gridWidth / 8);
-    const dispatchY = Math.ceil(gridHeight / 8);
-    passEncoder.dispatchWorkgroups(dispatchX, dispatchY);
-    passEncoder.end();
-
-    // Read back results
-    const stagingBuffer = device.createBuffer({
-        size: outputSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
-
-    commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputSize);
-    device.queue.submit([commandEncoder.finish()]);
-
-    await device.queue.onSubmittedWorkDone();
-    await stagingBuffer.mapAsync(GPUMapMode.READ);
-    const terrainData = new Float32Array(stagingBuffer.getMappedRange().slice());
-    stagingBuffer.unmap();
-
-    // Cleanup
-    outputBuffer.destroy();
-    stagingBuffer.destroy();
-    uniformBuffer.destroy();
-    indicesBuffer.destroy();
-
-    return terrainData;
-}
-
 /**
  * Generate radial toolpaths using bucket-angle pipeline
  */

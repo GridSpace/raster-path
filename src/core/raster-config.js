@@ -67,8 +67,6 @@ export let cachedTracingPipeline = null;
 export let cachedTracingShaderModule = null;
 export let cachedRadialV3RotatePipeline = null;
 export let cachedRadialV3RotateShaderModule = null;
-export let cachedRadialV3RasterizePipeline = null;
-export let cachedRadialV3RasterizeShaderModule = null;
 export let cachedRadialV3BatchedRasterizePipeline = null;
 export let cachedRadialV3BatchedRasterizeShaderModule = null;
 
@@ -104,7 +102,6 @@ const toolpathShaderCode = 'SHADER:planar-toolpath';
 const radialRasterizeShaderCode = 'SHADER:radial-raster';
 const tracingShaderCode = 'SHADER:tracing-toolpath';
 const radialV3RotateShaderCode = 'SHADER:radial-rotate-triangles';
-const radialV3RasterizeShaderCode = 'SHADER:radial-rasterize-filtered';
 const radialV3BatchedRasterizeShaderCode = 'SHADER:radial-rasterize-batched';
 
 // Initialize WebGPU device in worker context
@@ -183,15 +180,6 @@ export async function initWebGPU() {
         cachedRadialV3RotatePipeline = device.createComputePipeline({
             layout: 'auto',
             compute: { module: cachedRadialV3RotateShaderModule, entryPoint: 'main' },
-        });
-
-        // Pre-compile radial V3 rasterize shader module
-        cachedRadialV3RasterizeShaderModule = device.createShaderModule({ code: radialV3RasterizeShaderCode });
-
-        // Pre-create radial V3 rasterize pipeline
-        cachedRadialV3RasterizePipeline = device.createComputePipeline({
-            layout: 'auto',
-            compute: { module: cachedRadialV3RasterizeShaderModule, entryPoint: 'main' },
         });
 
         // Pre-compile radial V3 batched rasterize shader module
