@@ -69,6 +69,8 @@ export let cachedRadialV3RotatePipeline = null;
 export let cachedRadialV3RotateShaderModule = null;
 export let cachedRadialV3BatchedRasterizePipeline = null;
 export let cachedRadialV3BatchedRasterizeShaderModule = null;
+export let cachedRadialV4LathePipeline = null;
+export let cachedRadialV4LatheShaderModule = null;
 
 // Constants
 export const EMPTY_CELL = -1e10;
@@ -103,6 +105,7 @@ const radialRasterizeShaderCode = 'SHADER:radial-raster';
 const tracingShaderCode = 'SHADER:tracing-toolpath';
 const radialV3RotateShaderCode = 'SHADER:radial-rotate-triangles';
 const radialV3BatchedRasterizeShaderCode = 'SHADER:radial-rasterize-batched';
+const radialV4LatheShaderCode = 'SHADER:radial-lathe';
 
 // Initialize WebGPU device in worker context
 export async function initWebGPU() {
@@ -189,6 +192,15 @@ export async function initWebGPU() {
         cachedRadialV3BatchedRasterizePipeline = device.createComputePipeline({
             layout: 'auto',
             compute: { module: cachedRadialV3BatchedRasterizeShaderModule, entryPoint: 'main' },
+        });
+
+        // Pre-compile radial V4 lathe shader module
+        cachedRadialV4LatheShaderModule = device.createShaderModule({ code: radialV4LatheShaderCode });
+
+        // Pre-create radial V4 lathe pipeline
+        cachedRadialV4LathePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: cachedRadialV4LatheShaderModule, entryPoint: 'main' },
         });
 
         // Store device capabilities

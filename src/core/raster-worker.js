@@ -55,6 +55,7 @@ import { rasterizeMesh } from './raster-planar.js';
 import { generateToolpath } from './path-planar.js';
 import { generateRadialToolpaths } from './path-radial.js';
 import { generateRadialToolpathsV3 } from './path-radial-v3.js';
+import { generateRadialToolpathsV4 } from './path-radial-v4.js';
 import { generateTracingToolpaths, createReusableTracingBuffers, destroyReusableTracingBuffers } from './path-tracing.js';
 import { calibrateGPU } from './workload-calibrate.js';
 
@@ -136,6 +137,15 @@ self.onmessage = async function(e) {
                     type: 'radial-toolpaths-complete',
                     data: radialV3ToolpathResult
                 }, v3ToolpathTransferBuffers);
+                break;
+
+            case 'radial-generate-toolpaths-v4':
+                const radialV4ToolpathResult = await generateRadialToolpathsV4(data);
+                const v4ToolpathTransferBuffers = radialV4ToolpathResult.strips.map(strip => strip.pathData.buffer);
+                self.postMessage({
+                    type: 'radial-toolpaths-complete',
+                    data: radialV4ToolpathResult
+                }, v4ToolpathTransferBuffers);
                 break;
 
             case 'tracing-generate-toolpaths':
