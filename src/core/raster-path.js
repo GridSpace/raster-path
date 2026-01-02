@@ -112,6 +112,7 @@ export class RasterPath {
             autoTiling: config.autoTiling ?? true,
             batchDivisor: config.batchDivisor ?? 1, // For testing batching overhead
             radialV3: config.radialV3 ?? false, // Use radial V3 pipeline (rotate-filter-toolpath)
+            radialV4: config.radialV4 ?? false, // Use radial V4 pipeline (slice-based lathe)
             debug: config.debug,
             quiet: config.quiet
         };
@@ -532,10 +533,12 @@ export class RasterPath {
                 resolve(data);
             };
 
-            // Send entire pipeline to worker (use V3 if configured)
-            const messageType = this.config.radialV3
-                ? 'radial-generate-toolpaths-v3'
-                : 'radial-generate-toolpaths';
+            // Send entire pipeline to worker (use V3 or V4 if configured)
+            const messageType = this.config.radialV4
+                ? 'radial-generate-toolpaths-v4'
+                : this.config.radialV3
+                    ? 'radial-generate-toolpaths-v3'
+                    : 'radial-generate-toolpaths';
 
             this.#sendMessage(
                 messageType,

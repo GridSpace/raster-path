@@ -4,10 +4,11 @@ Fast browser-based terrain + tool path generator using WebGPU compute shaders.
 
 ## Features
 
-- **Dual Mode Rasterization**: Planar (traditional XY grid) and Radial (cylindrical unwrap) modes
+- **Multiple Operational Modes**: Planar (XY grid), Radial (cylindrical), and Tracing (path-following)
 - **CNC Toolpath Generation**: Generate toolpaths by simulating tool movement over terrain
 - **GPU Accelerated**: 20-100× faster than CPU-based solutions
-- **Unified API**: Clean three-method interface that works uniformly across both modes
+- **Optimized Radial Variants**: V2 (default), V3 (memory-optimized), and V4 (slice-based lathe)
+- **Unified API**: Clean three-method interface that works uniformly across all modes
 - **ESM Module**: Importable package for browser applications
 
 ## Quick Start
@@ -53,7 +54,7 @@ raster.terminate();
 ### Radial Mode (for cylindrical parts)
 
 ```javascript
-// Initialize for radial mode
+// Initialize for radial mode (V2 default)
 const raster = new RasterPath({
     mode: 'radial',
     resolution: 0.1,      // Radial resolution (mm)
@@ -79,6 +80,62 @@ const toolpathData = await raster.generateToolpaths({
 console.log(`Generated ${toolpathData.numStrips} strips, ${toolpathData.totalPoints} points`);
 ```
 
+**Radial Variants:**
+```javascript
+// Use V3 (memory-optimized) for large models
+const rasterV3 = new RasterPath({
+    mode: 'radial',
+    resolution: 0.1,
+    rotationStep: 1.0,
+    radialV3: true
+});
+
+// Use V4 (slice-based lathe, experimental) with pre-sliced data
+const rasterV4 = new RasterPath({
+    mode: 'radial',
+    resolution: 0.5,
+    rotationStep: 1.0,
+    radialV4: true
+});
+```
+
+### Tracing Mode (for path-following)
+
+```javascript
+// Initialize for tracing mode
+const raster = new RasterPath({
+    mode: 'tracing',
+    resolution: 0.1  // Terrain rasterization resolution
+});
+await raster.init();
+
+// Load tool and terrain
+await raster.loadTool({ triangles: toolTriangles });
+await raster.loadTerrain({
+    triangles: terrainTriangles,
+    zFloor: -100
+});
+
+// Define input paths as arrays of XY coordinate pairs
+const paths = [
+    new Float32Array([x1, y1, x2, y2, x3, y3, ...]),  // Path 1
+    new Float32Array([x1, y1, x2, y2, ...])           // Path 2
+];
+
+// Generate toolpaths by tracing along paths
+const toolpathData = await raster.generateToolpaths({
+    paths: paths,
+    step: 0.5,    // Sample every 0.5mm along each path
+    zFloor: -100
+});
+
+// Output is array of XYZ coordinate arrays (one per path)
+console.log(`Generated ${toolpathData.pathResults.length} traced paths`);
+toolpathData.pathResults.forEach((path, i) => {
+    console.log(`  Path ${i}: ${path.length / 3} points`);
+});
+```
+
 ### Demo UI
 
 ```bash
@@ -101,6 +158,9 @@ Open http://localhost:3000 and drag STL files onto the interface.
 
 ### Radial Mode (Cylindrical Rasterization)
 
+Three variants are available with different performance characteristics:
+
+#### V2 (Default) - Ray-Based Rasterization
 1. **Tool Rasterization**: Rasterize tool in planar mode (same as above)
 2. **Terrain Preparation**: Center terrain in YZ plane and store triangles
 3. **Toolpath Generation**:
@@ -109,6 +169,56 @@ Open http://localhost:3000 and drag STL files onto the interface.
    - Use X-bucketing optimization to partition triangles spatially
    - Calculate tool-terrain collisions along each radial strip
    - Output array of strips (one per angle), each containing Z-heights along X-axis
+
+#### V3 - Bucket-Angle Pipeline (Memory Optimized)
+Enable with `radialV3: true` option.
+
+**Algorithm:**
+1. **Tool Rasterization**: Same as V2
+2. **Terrain Preparation**: Bucket triangles by X-coordinate
+3. **Toolpath Generation** (for each rotation angle):
+   - Rotate all triangles in bucket by angle (GPU parallel)
+   - Filter by Y-bounds (skip triangles outside tool radius)
+   - Rasterize all buckets in single dispatch → dense terrain strip
+   - Generate toolpath from strip immediately
+
+**Advantages over V2:**
+- Lower memory usage (only one angle's data in GPU at a time)
+- Y-axis filtering reduces unnecessary triangle processing
+- Better cache locality by processing each bucket completely
+
+#### V4 - Slice-Based Lathe (Experimental)
+Enable with `radialV4: true` option.
+
+**Algorithm:**
+1. **Tool Rasterization**: Same as V2
+2. **Terrain Slicing** (CPU): Slice model along X-axis at dense intervals
+   - Each slice is a YZ plane intersection → array of line segments
+3. **Toolpath Generation** (for each rotation angle):
+   - Rotate all slice lines around X-axis (CPU)
+   - GPU shader traces tool through rotated slices
+   - For each X position, ray-cast through corresponding slice to find max Z collision
+
+**Advantages:**
+- No rasterization overhead, works directly with geometry
+- CPU/GPU balanced workload
+- Based on proven Kiri:Moto lathePath algorithm
+
+**Note:** V4 expects pre-sliced data and is designed for integration with external slicing engines.
+
+### Tracing Mode (Path-Following Toolpath)
+
+1. **Tool Rasterization**: Rasterize tool in planar mode
+2. **Terrain Rasterization**: Rasterize terrain on XY grid (same as planar mode)
+3. **Path Sampling**: Sample each input polyline at specified step resolution (e.g., every 0.5mm)
+4. **Toolpath Generation**:
+   - For each sampled point on each path:
+     - Convert world coordinates to terrain grid coordinates
+     - Test tool collision at that grid position using planar algorithm
+     - Calculate maximum collision Z-height
+   - Output array of XYZ coordinate arrays (one per input path)
+
+**Use Case:** Generate toolpaths that follow pre-defined paths (e.g., outlines, contours) rather than scanning the entire grid.
 
 ## Performance
 
@@ -148,9 +258,11 @@ build/                        # Built files (generated by npm run build)
 Constructor: `new RasterPath(options)`
 
 **Options**:
-- `mode` (string): `'planar'` or `'radial'`
+- `mode` (string): `'planar'`, `'radial'`, or `'tracing'`
 - `resolution` (number): Grid resolution in mm (e.g., 0.1)
 - `rotationStep` (number, radial only): Degrees between rays (e.g., 1.0)
+- `radialV3` (boolean, radial only): Enable V3 memory-optimized pipeline (default: false)
+- `radialV4` (boolean, radial only): Enable V4 slice-based lathe pipeline (default: false)
 
 #### `async init()`
 Initialize WebGPU worker. Must be called before other methods.
@@ -221,12 +333,21 @@ await raster.loadTerrain({
 
 ---
 
-#### `async generateToolpaths({ xStep, yStep, zFloor, onProgress })`
+#### `async generateToolpaths(options)`
 Generate toolpaths from loaded tool and terrain. Must call `loadTool()` and `loadTerrain()` first.
 
-**Parameters**:
+**Parameters (mode-dependent)**:
+
+**Planar and Radial modes:**
 - `xStep` (number): Sample every Nth point in X direction
 - `yStep` (number): Sample every Nth point in Y direction
+- `zFloor` (number): Z floor value for out-of-bounds areas
+- `radiusOffset` (number, radial only): Radial offset in mm
+- `onProgress` (function, optional): Progress callback `(progress: number) => void`
+
+**Tracing mode:**
+- `paths` (Array<Float32Array>): Array of input polylines (each as XY coordinate pairs)
+- `step` (number): Sample resolution along paths in world units (e.g., 0.5mm)
 - `zFloor` (number): Z floor value for out-of-bounds areas
 - `onProgress` (function, optional): Progress callback `(progress: number) => void`
 
@@ -243,14 +364,29 @@ Generate toolpaths from loaded tool and terrain. Must call `loadTool()` and `loa
   - `numStrips` (number): Total number of strips
   - `totalPoints` (number): Sum of all points across strips
 
-**Example**:
+- Tracing mode: `Promise<object>` with:
+  - `pathResults` (Array<Float32Array>): Array of XYZ coordinate arrays (one per input path)
+  - `totalPoints` (number): Sum of all points across paths
+
+**Examples**:
 ```javascript
-// Works for both planar and radial modes!
+// Planar and radial modes
 const toolpathData = await raster.generateToolpaths({
     xStep: 5,
     yStep: 5,
     zFloor: -100,
     radiusOffset: 20  // radial mode only
+});
+
+// Tracing mode
+const paths = [
+    new Float32Array([x1, y1, x2, y2, ...]),
+    new Float32Array([x1, y1, x2, y2, ...])
+];
+const toolpathData = await raster.generateToolpaths({
+    paths: paths,
+    step: 0.5,  // Sample every 0.5mm
+    zFloor: -100
 });
 ```
 

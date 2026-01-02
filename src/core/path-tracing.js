@@ -272,70 +272,162 @@ export async function generateTracingToolpaths({
     });
     device.queue.writeBuffer(maxZBuffer, 0, maxZInitData);
 
-    // Process each path
-    const outputPaths = [];
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 1: Sample all paths and build unified buffer
+    // ═══════════════════════════════════════════════════════════════════════
+    debug.log('PHASE 1: Sampling all paths...');
+    const pathIndex = [];  // Maps path ID → unified buffer offsets
+    const sampledSegments = [];
     let totalSampledPoints = 0;
 
     for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
-        const pathStartTime = performance.now();
         const inputPath = paths[pathIdx];
-
-        debug.log(`Processing path ${pathIdx + 1}/${paths.length}: ${inputPath.length / 2} input vertices`);
+        debug.log(`Path ${pathIdx + 1}/${paths.length}: ${inputPath.length / 2} input vertices`);
 
         // Sample path at specified resolution
         const sampledPath = samplePath(inputPath, step);
-        const numSampledPoints = sampledPath.length / 2;
-        totalSampledPoints += numSampledPoints;
+        const numPoints = sampledPath.length / 2;
 
-        debug.log(`  Sampled to ${numSampledPoints} points`);
+        pathIndex.push({
+            startOffset: totalSampledPoints,
+            endOffset: totalSampledPoints + numPoints,
+            numPoints: numPoints
+        });
 
-        // Debug: Log first sampled point and its grid coordinates
-        const firstX = sampledPath[0];
-        const firstY = sampledPath[1];
+        sampledSegments.push(sampledPath);
+        totalSampledPoints += numPoints;
+
+        debug.log(`  Sampled to ${numPoints} points`);
+    }
+
+    // Concatenate all sampled paths into unified buffer
+    const unifiedSampledXY = new Float32Array(totalSampledPoints * 2);
+    let writeOffset = 0;
+
+    for (let pathIdx = 0; pathIdx < sampledSegments.length; pathIdx++) {
+        const sampledPath = sampledSegments[pathIdx];
+        unifiedSampledXY.set(sampledPath, writeOffset * 2);
+        writeOffset += sampledPath.length / 2;
+    }
+
+    debug.log(`Unified buffer: ${totalSampledPoints} total points from ${paths.length} paths`);
+
+    // Debug: Log first sampled point
+    if (totalSampledPoints > 0) {
+        const firstX = unifiedSampledXY[0];
+        const firstY = unifiedSampledXY[1];
         const gridX = (firstX - terrainBounds.min.x) / gridStep;
         const gridY = (firstY - terrainBounds.min.y) / gridStep;
-        debug.log(`  First point: world(${firstX.toFixed(2)}, ${firstY.toFixed(2)}) -> grid(${gridX.toFixed(2)}, ${gridY.toFixed(2)})`);
-        debug.log(`  Terrain: ${terrainData.width}x${terrainData.height}, bounds: (${terrainBounds.min.x.toFixed(2)}, ${terrainBounds.min.y.toFixed(2)}) to (${terrainBounds.max.x.toFixed(2)}, ${terrainBounds.max.y.toFixed(2)})`);
+        debug.log(`First point: world(${firstX.toFixed(2)}, ${firstY.toFixed(2)}) -> grid(${gridX.toFixed(2)}, ${gridY.toFixed(2)})`);
+    }
 
-        // Check GPU memory limits
-        const inputBufferSize = sampledPath.byteLength;
-        const outputBufferSize = numSampledPoints * 4; // 4 bytes per float (Z only)
-        const estimatedMemory = inputBufferSize + outputBufferSize;
-        const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
-        const deviceLimit = deviceCapabilities.maxStorageBufferBindingSize;
-        const maxSafeSize = Math.min(configuredLimit, deviceLimit) * config.gpuMemorySafetyMargin;
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 2: Calculate memory budget and create chunks
+    // ═══════════════════════════════════════════════════════════════════════
+    debug.log('PHASE 2: Calculating memory budget and chunking...');
+    const bytesPerPoint = 8 + 4;  // XY input (2 floats) + Z output (1 float)
+    const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
+    const deviceLimit = deviceCapabilities.maxStorageBufferBindingSize;
+    const maxSafeSize = Math.min(configuredLimit, deviceLimit) * config.gpuMemorySafetyMargin;
 
-        if (estimatedMemory > maxSafeSize) {
+    // Fixed overhead: terrain, tool, maxZ, uniforms
+    const fixedOverhead = terrainPositions.byteLength +
+                          (sparseToolData.count * 16) +
+                          (paths.length * 4) +
+                          48;
+
+    if (fixedOverhead > maxSafeSize) {
+        if (shouldCleanupBuffers) {
             terrainBuffer.destroy();
             toolBuffer.destroy();
-            throw new Error(
-                `Path ${pathIdx + 1} exceeds GPU memory limits: ` +
-                `${(estimatedMemory / 1024 / 1024).toFixed(1)}MB > ` +
-                `${(maxSafeSize / 1024 / 1024).toFixed(1)}MB safe limit. ` +
-                `Consider reducing step parameter or splitting path.`
-            );
         }
+        throw new Error(
+            `Fixed buffers (terrain + tool) exceed GPU memory: ` +
+            `${(fixedOverhead / 1024 / 1024).toFixed(1)}MB > ` +
+            `${(maxSafeSize / 1024 / 1024).toFixed(1)}MB. ` +
+            `Try reducing terrain resolution or tool density.`
+        );
+    }
 
-        // Create GPU buffers for this path
-        const inputBuffer = device.createBuffer({
-            size: sampledPath.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    const availableForPaths = maxSafeSize - fixedOverhead;
+    const maxPointsPerChunk = Math.floor(availableForPaths / bytesPerPoint);
+
+    debug.log(`Memory budget: ${(maxSafeSize / 1024 / 1024).toFixed(1)}MB safe, ${(availableForPaths / 1024 / 1024).toFixed(1)}MB available for paths`);
+    debug.log(`Max points per chunk: ${maxPointsPerChunk.toLocaleString()}`);
+
+    // Create chunks
+    const chunks = [];
+    let currentStart = 0;
+    while (currentStart < totalSampledPoints) {
+        const currentEnd = Math.min(currentStart + maxPointsPerChunk, totalSampledPoints);
+        chunks.push({
+            startPoint: currentStart,
+            endPoint: currentEnd,
+            numPoints: currentEnd - currentStart
         });
-        device.queue.writeBuffer(inputBuffer, 0, sampledPath);
+        currentStart = currentEnd;
+    }
 
-        const outputBuffer = device.createBuffer({
-            size: outputBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-        });
+    debug.log(`Created ${chunks.length} chunk(s) for processing`);
 
-        // Create uniforms (aligned to match shader struct)
-        // Struct: 5 u32s + 4 f32s = 36 bytes, padded to 48 bytes for alignment
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 3: Create reusable GPU buffers (buffer pool pattern)
+    // ═══════════════════════════════════════════════════════════════════════
+    debug.log('PHASE 3: Creating reusable GPU buffers...');
+
+    // Input buffer: XY pairs for sampled points
+    const inputBuffer = device.createBuffer({
+        size: maxPointsPerChunk * 8,  // 2 floats per point
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // Output buffer: Z depths
+    const outputBuffer = device.createBuffer({
+        size: maxPointsPerChunk * 4,  // 1 float per point
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    // Uniform buffer
+    const uniformBuffer = device.createBuffer({
+        size: 48,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Staging buffer for readback
+    const stagingBuffer = device.createBuffer({
+        size: maxPointsPerChunk * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    // Unified output array (filled chunk-by-chunk)
+    const unifiedOutputZ = new Float32Array(totalSampledPoints);
+
+    debug.log(`Buffers created for ${maxPointsPerChunk.toLocaleString()} points per chunk`);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 4: Process each chunk with single GPU dispatch
+    // ═══════════════════════════════════════════════════════════════════════
+    debug.log('PHASE 4: Processing chunks...');
+
+    for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+        const chunk = chunks[chunkIdx];
+        const { startPoint, endPoint, numPoints } = chunk;
+
+        debug.log(`Processing chunk ${chunkIdx + 1}/${chunks.length}: points ${startPoint}-${endPoint} (${numPoints} points)`);
+
+        // Extract chunk slice from unified buffer
+        const chunkInputXY = unifiedSampledXY.subarray(startPoint * 2, endPoint * 2);
+
+        // Upload to GPU (reuse same buffers)
+        device.queue.writeBuffer(inputBuffer, 0, chunkInputXY);
+
+        // Update uniforms for this chunk
         const uniformData = new Uint32Array(12); // 48 bytes
         uniformData[0] = terrainData.width;
         uniformData[1] = terrainData.height;
         uniformData[2] = sparseToolData.count;
-        uniformData[3] = numSampledPoints;
-        uniformData[4] = pathIdx;  // path_index for maxZ buffer indexing
+        uniformData[3] = numPoints;  // point_count for THIS CHUNK
+        uniformData[4] = 0;  // path_index (unused, maxZ computed on CPU)
 
         const uniformDataFloat = new Float32Array(uniformData.buffer);
         uniformDataFloat[5] = terrainBounds.min.x;
@@ -343,16 +435,12 @@ export async function generateTracingToolpaths({
         uniformDataFloat[7] = gridStep;
         uniformDataFloat[8] = zFloor;
 
-        const uniformBuffer = device.createBuffer({
-            size: uniformData.byteLength,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
         device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-        // Wait for buffer uploads
+        // Wait for uploads
         await device.queue.onSubmittedWorkDone();
 
-        // Create bind group
+        // Create bind group (same bindings as before)
         const bindGroup = device.createBindGroup({
             layout: cachedTracingPipeline.getBindGroupLayout(0),
             entries: [
@@ -360,28 +448,23 @@ export async function generateTracingToolpaths({
                 { binding: 1, resource: { buffer: toolBuffer } },
                 { binding: 2, resource: { buffer: inputBuffer } },
                 { binding: 3, resource: { buffer: outputBuffer } },
-                { binding: 4, resource: { buffer: maxZBuffer } },
+                { binding: 4, resource: { buffer: maxZBuffer } },  // Keep for shader compatibility
                 { binding: 5, resource: { buffer: uniformBuffer } },
             ],
         });
 
-        // Dispatch compute shader
+        // Single GPU dispatch for entire chunk
         const commandEncoder = device.createCommandEncoder();
         const passEncoder = commandEncoder.beginComputePass();
         passEncoder.setPipeline(cachedTracingPipeline);
         passEncoder.setBindGroup(0, bindGroup);
 
-        const workgroupsX = Math.ceil(numSampledPoints / 64);
+        const workgroupsX = Math.ceil(numPoints / 64);
         passEncoder.dispatchWorkgroups(workgroupsX);
         passEncoder.end();
 
         // Copy output to staging buffer
-        const stagingBuffer = device.createBuffer({
-            size: outputBufferSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-        });
-
-        commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, outputBufferSize);
+        commandEncoder.copyBufferToBuffer(outputBuffer, 0, stagingBuffer, 0, numPoints * 4);
         device.queue.submit([commandEncoder.finish()]);
 
         // Wait for GPU to finish
@@ -389,65 +472,79 @@ export async function generateTracingToolpaths({
 
         // Read back results
         await stagingBuffer.mapAsync(GPUMapMode.READ);
-        const outputDepths = new Float32Array(stagingBuffer.getMappedRange());
-        const depthsCopy = new Float32Array(outputDepths);
+        const chunkOutputZ = new Float32Array(stagingBuffer.getMappedRange(), 0, numPoints);
+
+        // Copy to unified output array
+        unifiedOutputZ.set(chunkOutputZ, startPoint);
+
         stagingBuffer.unmap();
 
-        // Build XYZ output array
-        const outputXYZ = new Float32Array(numSampledPoints * 3);
-        for (let i = 0; i < numSampledPoints; i++) {
-            outputXYZ[i * 3 + 0] = sampledPath[i * 2 + 0]; // X
-            outputXYZ[i * 3 + 1] = sampledPath[i * 2 + 1]; // Y
-            outputXYZ[i * 3 + 2] = depthsCopy[i];           // Z
-        }
+        debug.log(`  Chunk ${chunkIdx + 1} complete: ${numPoints} points processed`);
 
-        outputPaths.push(outputXYZ);
-
-        // Cleanup path-specific buffers
-        inputBuffer.destroy();
-        outputBuffer.destroy();
-        uniformBuffer.destroy();
-        stagingBuffer.destroy();
-
-        const pathTime = performance.now() - pathStartTime;
-        debug.log(`  Path ${pathIdx + 1} complete: ${numSampledPoints} points in ${pathTime.toFixed(1)}ms`);
-
-        // Report progress
+        // Report progress (point-based, not path-based)
         if (onProgress) {
             onProgress({
                 type: 'tracing-progress',
                 data: {
-                    percent: Math.round(((pathIdx + 1) / paths.length) * 100),
-                    current: pathIdx + 1,
-                    total: paths.length,
-                    pathIndex: pathIdx
+                    percent: Math.round((endPoint / totalSampledPoints) * 100),
+                    current: endPoint,
+                    total: totalSampledPoints,
+                    chunkIndex: chunkIdx + 1,
+                    totalChunks: chunks.length
                 }
             });
         }
     }
 
-    // Read back maxZ buffer
-    const maxZStagingBuffer = device.createBuffer({
-        size: maxZInitData.byteLength,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
+    // Cleanup reusable buffers
+    inputBuffer.destroy();
+    outputBuffer.destroy();
+    uniformBuffer.destroy();
+    stagingBuffer.destroy();
 
-    const maxZCommandEncoder = device.createCommandEncoder();
-    maxZCommandEncoder.copyBufferToBuffer(maxZBuffer, 0, maxZStagingBuffer, 0, maxZInitData.byteLength);
-    device.queue.submit([maxZCommandEncoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
+    debug.log('All chunks processed');
 
-    await maxZStagingBuffer.mapAsync(GPUMapMode.READ);
-    const maxZBitsI32 = new Int32Array(maxZStagingBuffer.getMappedRange());
-    const maxZBitsCopy = new Int32Array(maxZBitsI32);
-    maxZStagingBuffer.unmap();
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHASE 5: Remap unified output back to individual paths & compute maxZ
+    // ═══════════════════════════════════════════════════════════════════════
+    debug.log('PHASE 5: Remapping to individual paths and computing maxZ...');
 
-    // Convert i32 bits back to f32 values
-    const maxZValues = new Float32Array(maxZBitsCopy.buffer);
+    const outputPaths = [];
+    const maxZValues = new Array(paths.length).fill(zFloor);
 
-    // Cleanup buffers
+    for (let pathIdx = 0; pathIdx < pathIndex.length; pathIdx++) {
+        const { startOffset, numPoints } = pathIndex[pathIdx];
+
+        if (numPoints === 0) {
+            outputPaths.push(new Float32Array(0));  // Empty path
+            debug.log(`Path ${pathIdx + 1}: empty`);
+            continue;
+        }
+
+        // Allocate XYZ output
+        const pathXYZ = new Float32Array(numPoints * 3);
+
+        // Copy from unified buffers + compute maxZ
+        for (let i = 0; i < numPoints; i++) {
+            const unifiedIdx = startOffset + i;
+            const x = unifiedSampledXY[unifiedIdx * 2 + 0];
+            const y = unifiedSampledXY[unifiedIdx * 2 + 1];
+            const z = unifiedOutputZ[unifiedIdx];
+
+            pathXYZ[i * 3 + 0] = x;
+            pathXYZ[i * 3 + 1] = y;
+            pathXYZ[i * 3 + 2] = z;
+
+            // Track max Z for this path (CPU-side)
+            maxZValues[pathIdx] = Math.max(maxZValues[pathIdx], z);
+        }
+
+        outputPaths.push(pathXYZ);
+        debug.log(`Path ${pathIdx + 1}: ${numPoints} points, maxZ=${maxZValues[pathIdx].toFixed(2)}`);
+    }
+
+    // Cleanup maxZ buffer (was only used for shader compatibility)
     maxZBuffer.destroy();
-    maxZStagingBuffer.destroy();
 
     // Cleanup temporary buffers only (don't destroy cached buffers)
     if (shouldCleanupBuffers) {
@@ -468,25 +565,19 @@ export async function generateTracingToolpaths({
 }
 
 /**
- * TODO: Batched path processing
+ * IMPLEMENTATION NOTE: Unified Batching System
  *
- * OPTIMIZATION OPPORTUNITY:
- * Currently processes one path at a time. For better GPU utilization:
+ * This function uses a unified batching approach for optimal performance:
  *
- * 1. Concatenate all sampled paths into single input buffer
- * 2. Create offset table: [path1Start, path1End, path2Start, path2End, ...]
- * 3. Single GPU dispatch processes all paths
- * 4. Split output buffer back into individual path arrays
+ * 1. All paths are sampled and concatenated into a single unified buffer
+ * 2. Paths are chunked based on GPU memory limits (handles giant paths)
+ * 3. Each chunk is processed with a single GPU dispatch (reduces overhead)
+ * 4. Output is remapped back to individual path arrays
+ * 5. MaxZ is computed on CPU (avoids complex GPU atomic coordination)
  *
  * BENEFITS:
- * - Reduce GPU dispatch overhead (N dispatches → 1 dispatch)
- * - Better GPU occupancy (more threads active)
- * - Fewer buffer create/destroy cycles
- *
- * COMPLEXITY:
- * - Need offset management in shader or CPU-side splitting
- * - Memory limit checking becomes more complex
- * - Progress reporting granularity reduced (can still report workgroup completion)
- *
- * ESTIMATE: 2-5x speedup for many small paths, minimal benefit for few large paths
+ * - Handles paths that exceed GPU memory limits (automatic chunking)
+ * - Reduces GPU dispatch overhead (10-100x for many small paths)
+ * - Better progress tracking (point-based instead of path-based)
+ * - Buffer pool pattern reduces allocation overhead
  */
