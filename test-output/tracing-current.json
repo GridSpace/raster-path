@@ -1,9 +1,9 @@
 {
   "success": true,
   "terrainLoad": 26.800000190734863,
-  "toolLoad": 122.30000019073486,
-  "toolpathGeneration": 43.5,
-  "totalTime": 192.60000038146973,
+  "toolLoad": 13.300000190734863,
+  "toolpathGeneration": 33.69999980926514,
+  "totalTime": 73.80000019073486,
   "inputPoints": 10,
   "outputPoints": 154,
   "densificationFactor": 15.4,

@@ -325,7 +325,7 @@ export async function generateTracingToolpaths({
     // PHASE 2: Calculate memory budget and create chunks
     // ═══════════════════════════════════════════════════════════════════════
     debug.log('PHASE 2: Calculating memory budget and chunking...');
-    const bytesPerPoint = 8 + 4;  // XY input (2 floats) + Z output (1 float)
+    const bytesPerPoint = 8 + 4 + 4;  // XY input (8) + Z output (4) + Z staging (4)
     const configuredLimit = config.maxGPUMemoryMB * 1024 * 1024;
     const deviceLimit = deviceCapabilities.maxStorageBufferBindingSize;
     const maxSafeSize = Math.min(configuredLimit, deviceLimit) * config.gpuMemorySafetyMargin;
@@ -350,10 +350,20 @@ export async function generateTracingToolpaths({
     }
 
     const availableForPaths = maxSafeSize - fixedOverhead;
-    const maxPointsPerChunk = Math.floor(availableForPaths / bytesPerPoint);
+    const maxPointsPerChunkMemory = Math.floor(availableForPaths / bytesPerPoint);
+
+    // GPU dispatch limit: 65535 workgroups per dimension, 64 threads per workgroup
+    const maxWorkgroupsPerDimension = deviceCapabilities.maxComputeWorkgroupsPerDimension || 65535;
+    const threadsPerWorkgroup = 64;
+    const maxPointsPerChunkGPU = maxWorkgroupsPerDimension * threadsPerWorkgroup;
+
+    // Use the smaller of memory limit and GPU dispatch limit
+    const maxPointsPerChunk = Math.min(maxPointsPerChunkMemory, maxPointsPerChunkGPU);
 
     debug.log(`Memory budget: ${(maxSafeSize / 1024 / 1024).toFixed(1)}MB safe, ${(availableForPaths / 1024 / 1024).toFixed(1)}MB available for paths`);
-    debug.log(`Max points per chunk: ${maxPointsPerChunk.toLocaleString()}`);
+    debug.log(`Memory-based max: ${maxPointsPerChunkMemory.toLocaleString()} points`);
+    debug.log(`GPU dispatch max: ${maxPointsPerChunkGPU.toLocaleString()} points (${maxWorkgroupsPerDimension.toLocaleString()} workgroups)`);
+    debug.log(`Max points per chunk: ${maxPointsPerChunk.toLocaleString()} (limited by ${maxPointsPerChunk === maxPointsPerChunkGPU ? 'GPU' : 'memory'})`);
 
     // Create chunks
     const chunks = [];
