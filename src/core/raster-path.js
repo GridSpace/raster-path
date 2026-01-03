@@ -464,7 +464,12 @@ export class RasterPath {
             // Set up progress handler if callback provided
             if (onProgress) {
                 const progressHandler = (data) => {
-                    onProgress(data.percent, { current: data.current, total: data.total, pathIndex: data.pathIndex });
+                    onProgress(data.percent, {
+                        current: data.current,
+                        total: data.total,
+                        chunkIndex: data.chunkIndex,
+                        totalChunks: data.totalChunks
+                    });
                 };
                 this.messageHandlers.set('tracing-progress', progressHandler);
             }
@@ -570,7 +575,7 @@ export class RasterPath {
         const { type, success, data } = e.data;
 
         // Handle progress messages (don't delete handler)
-        if (type === 'rasterize-progress' || type === 'toolpath-progress') {
+        if (type === 'rasterize-progress' || type === 'toolpath-progress' || type === 'tracing-progress') {
             const handler = this.messageHandlers.get(type);
             if (handler) {
                 handler(data);
