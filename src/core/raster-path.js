@@ -681,18 +681,32 @@ export class RasterPath {
         }
 
         // Flatten triangle indices for GPU
-        const triangleIndices = [];
+        // Pre-calculate total size for optimal performance
+        let totalIndices = 0;
+        for (let i = 0; i < buckets.length; i++) {
+            totalIndices += buckets[i].triangleIndices.length;
+        }
+
+        // Pre-allocate array to avoid resizing overhead
+        const triangleIndices = new Array(totalIndices);
         const bucketInfo = [];
+        let offset = 0;
 
         for (let i = 0; i < buckets.length; i++) {
             const bucket = buckets[i];
+            const indices = bucket.triangleIndices;
+
             bucketInfo.push({
                 minX: bucket.minX,
                 maxX: bucket.maxX,
-                startIndex: triangleIndices.length,
-                count: bucket.triangleIndices.length
+                startIndex: offset,
+                count: indices.length
             });
-            triangleIndices.push(...bucket.triangleIndices);
+
+            // Copy indices using fast indexed access
+            for (let j = 0; j < indices.length; j++) {
+                triangleIndices[offset++] = indices[j];
+            }
         }
 
         return {
