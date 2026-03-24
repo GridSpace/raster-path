@@ -26,13 +26,10 @@
   },
   "scripts": {
     "prepare": "npm run build",
-    "postinstall": "npm run build",
-    "build": "npm run clean && npm run build:web && npm run build:shaders",
+    "build": "npm run build:web && npm run build:shaders",
     "build:shaders": "node scripts/build-shaders.js",
-    "build:web": "mkdir -p build && cp src/web/*.html src/web/*.css src/web/*.js build/ && cp src/core/raster-path.js build/raster-path.js && cp src/etc/serve.json build/",
-    "clean": "rm -rf build/",
-    "dev": "npm run build && npm run serve",
-    "serve": "npm run build && npx serve build --config serve.json --listen 9090",
+    "build:web": "node scripts/build-web.js",
+    "dev": "npm run build && npx serve build-web --config serve.json --listen 9090",
     "publish:public": "npm publish --access public",
     "test": "npm run test:planar && npm run test:radial",
     "test:planar": "npm run build && npx electron src/test/planar-test.cjs",
@@ -61,8 +58,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^28.0.0",
     "esbuild": "^0.27.0",
-    "serve": "^14.2.1"
+    "serve": "^14.2.6"
   }
 }

@@ -8,11 +8,9 @@
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = import.meta.dirname;
 
 const SHADER_DIR = path.join(__dirname, '../src/shaders');
 const WORKER_SRC = path.join(__dirname, '../src/core/raster-worker.js');
@@ -22,18 +20,18 @@ const WORKER_DEST = path.join(BUILD_DIR, 'raster-worker.js');
 
 // Ensure build directory exists
 if (!fs.existsSync(BUILD_DIR)) {
-    fs.mkdirSync(BUILD_DIR, { recursive: true });
+  fs.mkdirSync(BUILD_DIR, { recursive: true });
 }
 
 // Step 1: Bundle worker modules with esbuild
 console.log('📦 Bundling worker modules with esbuild...');
 await esbuild.build({
-    entryPoints: [WORKER_SRC],
-    bundle: true,
-    format: 'esm',
-    outfile: WORKER_BUNDLED,
-    platform: 'browser',
-    target: 'es2020',
+  entryPoints: [WORKER_SRC],
+  bundle: true,
+  format: 'esm',
+  outfile: WORKER_BUNDLED,
+  platform: 'browser',
+  target: 'es2020',
 });
 console.log(`✅ Bundled: ${WORKER_BUNDLED}`);
 
@@ -46,33 +44,28 @@ let match;
 const replacements = [];
 
 while ((match = shaderRegex.exec(workerCode)) !== null) {
-    const shaderName = match[1];
-    const placeholder = match[0];
-    replacements.push({ shaderName, placeholder });
+  const shaderName = match[1];
+  const placeholder = match[0];
+  replacements.push({ shaderName, placeholder });
 }
 
 // Replace each placeholder with shader code
 for (const { shaderName, placeholder } of replacements) {
-    const shaderPath = path.join(SHADER_DIR, `${shaderName}.wgsl`);
+  const shaderPath = path.join(SHADER_DIR, `${shaderName}.wgsl`);
 
-    if (!fs.existsSync(shaderPath)) {
-        console.error(`❌ Shader file not found: ${shaderPath}`);
-        process.exit(1);
-    }
+  if (!fs.existsSync(shaderPath)) {
+    console.error(`❌ Shader file not found: ${shaderPath}`);
+    process.exit(1);
+  }
 
-    const shaderCode = fs.readFileSync(shaderPath, 'utf8');
+  const shaderCode = fs.readFileSync(shaderPath, 'utf8');
 
-    // Wrap in template literal and escape backticks
-    const escapedShader = shaderCode.replace(/`/g, '\\`').replace(/\$/g, '\\$');
-    const wrapped = '`' + escapedShader + '`';
+  // Wrap in template literal and escape backticks
+  const escapedShader = shaderCode.replace(/`/g, '\\`').replace(/\$/g, '\\$');
+  const wrapped = '`' + escapedShader + '`';
 
-    workerCode = workerCode.replace(placeholder, wrapped);
-    console.log(`✅ Injected shader: ${shaderName}.wgsl`);
-}
-
-// Ensure build directory exists
-if (!fs.existsSync(BUILD_DIR)) {
-    fs.mkdirSync(BUILD_DIR, { recursive: true });
+  workerCode = workerCode.replace(placeholder, wrapped);
+  console.log(`✅ Injected shader: ${shaderName}.wgsl`);
 }
 
 // Inject unique build ID
